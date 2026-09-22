@@ -1,11 +1,19 @@
+# Environment & Secrets
+.env
+*.env
+!.env.example
+!backend/.env.example
+
 # Python
 __pycache__/
 *.pyc
 .venv/
+.pytest_cache/
 
 # Node
 node_modules/
 frontend/dist/
+*.tsbuildinfo
 
 # Data
 data/
@@ -27,3 +35,4 @@ n.json
 s4.json
 s5.json
 .freebuff/
+

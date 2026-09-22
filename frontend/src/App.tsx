@@ -1,181 +1,170 @@
 import React, { useEffect, useState } from 'react'
-import { useStore } from './store'
-import { statusBadge, SyntheticTopBadge } from './components'
-import { post } from './api'
+import { getMdmStatus, MdmStatus } from './api'
 
-// Page components
-import { OverviewPage } from './pages/overview'
-import { LivePage } from './pages/live'
-import { DataPage } from './pages/data'
-import { ForecastPage } from './pages/forecast'
-import { AutonomyPage } from './pages/autonomy'
-import { OptimizationPage } from './pages/optimization'
-import { SafetyPage } from './pages/safety'
-import { ResupplyPage } from './pages/resupply'
-import { ScenariosPage } from './pages/scenarios'
-import { BaselinePage } from './pages/baseline'
-import { AlertsPage } from './pages/alerts'
-import { HistoryPage } from './pages/history'
-import { SystemPage } from './pages/system'
-import { SettingsPage } from './pages/settings'
+// MDM Page components
+import { MdmOverviewPage } from './pages/mdm_overview'
+import { MdmEnergyPage } from './pages/mdm_energy'
+import { MdmEquipmentPage } from './pages/mdm_equipment'
+import { MdmResourceRiskPage } from './pages/mdm_resource_risk'
+import { MdmAnalystPage } from './pages/mdm_analyst'
+import { MdmUploadPage } from './pages/mdm_upload'
 
-const NAV = [
-  { section: 'Operations' },
-  { id: 'overview', label: 'Overview' },
-  { id: 'live', label: 'Live State' },
-
-  { section: 'Decision' },
-  { id: 'optimization', label: 'Operating Plan' },
-  { id: 'forecast', label: 'Forecast & Uncertainty' },
-  { id: 'autonomy', label: 'Safe Operability & CQRM' },
-  { id: 'scenarios', label: 'Scenarios & Stress Demo' },
-  { id: 'baseline', label: 'Baseline Comparison' },
-
-  { section: 'Control' },
-  { id: 'safety', label: 'Safety Validation Gate' },
-  { id: 'resupply', label: 'Resupply Logistics' },
-
-  { section: 'System' },
-  { id: 'alerts', label: 'Alerts' },
-  { id: 'data', label: 'Data Diagnostics' },
-  { id: 'history', label: 'Action Audit' },
-  { id: 'system', label: 'System Health' },
-  { id: 'settings', label: 'Settings' },
+const NAV_ITEMS = [
+  { id: 'overview', label: 'Overview', icon: '⌂', symbol: 'Overview' },
+  { id: 'energy', label: 'Energy Analysis', icon: '⚡', symbol: 'Energy' },
+  { id: 'equipment', label: 'Equipment Health', icon: '⚙', symbol: 'Equipment' },
+  { id: 'resource_risk', label: 'Resource Risk', icon: '🛡', symbol: 'Resource Risk' },
+  { id: 'analyst', label: 'AI Analyst', icon: '✨', symbol: 'AI Analyst' },
+  { id: 'upload', label: 'Dataset Management', icon: '📁', symbol: 'Datasets' },
 ] as const
 
-export type PageId = typeof NAV[number] extends { id: infer I } ? I : never
+export type PageId = typeof NAV_ITEMS[number]['id']
 
 export const App: React.FC = () => {
-  const { station, connected, refresh } = useStore()
-
-  // LocalStorage persistence for page and state
   const [page, setPage] = useState<string>(() => {
-    return localStorage.getItem('polar_ems_page') || 'overview'
+    return localStorage.getItem('polar_mdm_page') || 'overview'
   })
+  const [searchQuery, setSearchQuery] = useState('')
+  const [mdmStatus, setMdmStatus] = useState<MdmStatus | null>(null)
+
+  const refreshStatus = async () => {
+    try {
+      const st = await getMdmStatus()
+      setMdmStatus(st)
+    } catch (err) {
+      console.error('Error fetching MDM status:', err)
+    }
+  }
 
   useEffect(() => {
-    localStorage.setItem('polar_ems_page', page)
+    localStorage.setItem('polar_mdm_page', page)
   }, [page])
 
-  // Restore delay state from localStorage on first mount if present
   useEffect(() => {
-    const savedDelay = localStorage.getItem('polar_ems_resupply_delay')
-    if (savedDelay) {
-      const d = parseFloat(savedDelay)
-      if (!isNaN(d) && d > 0) {
-        post('/resupply/delay', { delay_days: d }).catch(() => {})
-      }
-    }
+    refreshStatus()
+    const interval = setInterval(refreshStatus, 8000)
+    return () => clearInterval(interval)
   }, [])
 
   const pages: Record<string, React.ReactNode> = {
-    overview: <OverviewPage onNavigate={setPage} />,
-    live: <LivePage />,
-    data: <DataPage />,
-    forecast: <ForecastPage />,
-    autonomy: <AutonomyPage />,
-    optimization: <OptimizationPage />,
-    safety: <SafetyPage />,
-    resupply: <ResupplyPage />,
-    scenarios: <ScenariosPage />,
-    baseline: <BaselinePage />,
-    alerts: <AlertsPage />,
-    history: <HistoryPage />,
-    system: <SystemPage />,
-    settings: <SettingsPage />,
+    overview: <MdmOverviewPage onNavigate={setPage} />,
+    energy: <MdmEnergyPage onNavigate={setPage} />,
+    equipment: <MdmEquipmentPage onNavigate={setPage} />,
+    resource_risk: <MdmResourceRiskPage onNavigate={setPage} />,
+    analyst: <MdmAnalystPage onNavigate={setPage} />,
+    upload: <MdmUploadPage onNavigate={setPage} onUploadSuccess={refreshStatus} />,
   }
 
-  const isOffline = station && station.connectivity.internet !== 'ONLINE'
+  // Active page title map
+  const pageTitles: Record<string, { title: string; subtitle: string }> = {
+    overview: { title: 'Overview', subtitle: 'Station Operational Intelligence & Multi-Resource Matrix' },
+    energy: { title: 'Energy Analytics', subtitle: 'Continuous Load Profiling, Spikes & Thermal Correlation' },
+    equipment: { title: 'Equipment Health', subtitle: 'Statistical Anomaly Detection & Failure Risk Matrix' },
+    resource_risk: { title: 'Resource Risk', subtitle: 'Battery Reserves, Consumables & Environmental Stress' },
+    analyst: { title: 'AI Operational Analyst', subtitle: 'Empirical Query Assistant Backed by Telemetry Data' },
+    upload: { title: 'Dataset Management', subtitle: 'Ingestion, Cleaning Pipeline & Historical Provenance' },
+  }
+
+  const currentInfo = pageTitles[page] || { title: 'Overview', subtitle: 'Management Dashboard' }
 
   return (
     <>
-      <aside className="sidebar">
-        <div className="brand">
-          <h1>POLAR-EMS</h1>
-          <div className="sub">AUTONOMY-AWARE ENERGY MANAGEMENT</div>
-          <div style={{ marginTop: 6 }}>
-            <span style={{ fontSize: 9, color: 'var(--text-dim)', letterSpacing: 0.5, textTransform: 'uppercase' }}>
-              Maitri Station Simulation
-            </span>
-          </div>
+      {/* Left Sleek Icon Rail Sidebar (Reference Layout) */}
+      <aside className="sidebar-rail">
+        {/* Geometric Diamond Star Logo */}
+        <div className="brand-icon-logo" onClick={() => setPage('overview')} title="EVision / POLAR-EMS">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+            <path d="M12 2L14.5 9.5L22 12L14.5 14.5L12 22L9.5 14.5L2 12L9.5 9.5L12 2Z" fill="#ffffff" />
+          </svg>
         </div>
 
-        {NAV.map(item =>
-          'section' in item ? (
-            <div className="nav-section" key={item.section}>{item.section}</div>
-          ) : (
+        {/* Main Rail Navigation Icons */}
+        <nav className="rail-nav">
+          {NAV_ITEMS.map((item) => (
             <a
               key={item.id}
-              className={`nav-item ${page === item.id ? 'active' : ''}`}
+              className={`rail-item ${page === item.id ? 'active' : ''}`}
               onClick={() => setPage(item.id)}
             >
-              {item.label}
+              <span style={{ fontSize: item.id === 'overview' ? 20 : 16 }}>{item.icon}</span>
+              <span className="tooltip">{item.label}</span>
             </a>
-          ),
-        )}
-      </aside>
+          ))}
+        </nav>
 
-      <main className="main">
-        {/* TOP BAR: Persistent Synthetic Label + Live System Status */}
-        <div className="topbar">
-          <div className="row" style={{ gap: 10 }}>
-            {/* 1. PERSISTENT SYNTHETIC DATA LABEL (Locked Decision 1) */}
-            <SyntheticTopBadge />
-
-            {/* Operating Mode Badge */}
-            {statusBadge(station ? station.mode : 'OFFLINE')}
-
-            {isOffline ? (
-              <span className="badge critical">OFFLINE — LOCAL ENGINE ACTIVE</span>
-            ) : (
-              <span className="badge safe">ONLINE (OFFLINE-READY)</span>
-            )}
-
-            <span
-              className="dot"
-              style={{ background: connected ? 'var(--green)' : 'var(--red)' }}
-              title={connected ? 'Polling active' : 'Offline'}
-            />
+        {/* Bottom System & Logout Controls */}
+        <div style={{ marginTop: 'auto', display: 'flex', flexDirection: 'column', gap: 10, alignItems: 'center' }}>
+          <div
+            className="rail-item"
+            style={{ width: 38, height: 38 }}
+            onClick={() => setPage('upload')}
+            title="System Settings & Database"
+          >
+            <span style={{ fontSize: 15 }}>⚙</span>
+            <span className="tooltip">Settings &amp; Data</span>
           </div>
-
-          <div className="row" style={{ fontSize: 12, color: 'var(--text-dim)', gap: 14 }}>
-            <span>
-              Resupply: <b>{station ? `${station.resupply.in_days.toFixed(1)} d` : '—'}</b>
-              {station?.resupply?.delay_days ? (
-                <span style={{ color: 'var(--conserve)', marginLeft: 4 }}>
-                  (+{station.resupply.delay_days.toFixed(0)}d delay)
-                </span>
-              ) : null}
-            </span>
-            {station && !station.mode_auto && <span className="badge caution">MANUAL OVERRIDE</span>}
-            <span style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>
-              {connected ? '3s Live Loop' : 'Connecting…'}
-            </span>
+          <div
+            className="rail-item"
+            style={{ width: 38, height: 38 }}
+            onClick={refreshStatus}
+            title="Refresh System Telemetry"
+          >
+            <span style={{ fontSize: 15 }}>↻</span>
+            <span className="tooltip">Refresh Engine</span>
           </div>
         </div>
+      </aside>
 
-        {/* OFFLINE LOCAL MODE BANNER (Only when offline) */}
-        {isOffline && (
-          <div className="offline-banner" style={{ marginBottom: 12 }}>
-            <div className="row" style={{ justifyContent: 'space-between' }}>
-              <b>SATELLITE LINK SEVERED — 100% AUTONOMOUS LOCAL DISPATCH ACTIVE</b>
-              <span className="badge safe" style={{ background: '#fff' }}>ZERO CLOUD DEPENDENCY</span>
+      {/* Main Content Area */}
+      <main className="main-container">
+        {/* Top App Header (Reference Screenshot Style) */}
+        <header className="app-header">
+          <div className="header-title-section">
+            <h1>{currentInfo.title}</h1>
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
+            {/* Search Pill */}
+            <div className="header-search">
+              <span style={{ color: 'var(--text-muted)', fontSize: 13 }}>🔍</span>
+              <input
+                type="text"
+                placeholder="Search metrics, telemetry..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+              />
             </div>
-            <div className="offline-engines">
-              <span>LOCAL FORECAST: ACTIVE</span>
-              <span>LOCAL LP OPTIMIZATION: ACTIVE</span>
-              <span>SAFETY GATE: ACTIVE</span>
-              <span>CQRM ENGINE: ACTIVE</span>
-              <span>LOCAL DB: ACTIVE</span>
+
+            {/* Connection Status Pill */}
+            <div
+              className={`badge ${mdmStatus?.has_data ? 'safe' : 'caution'}`}
+              style={{ padding: '6px 12px', fontSize: 11, borderRadius: 20 }}
+            >
+              <span className={`dot ${mdmStatus?.has_data ? 'green' : 'amber'}`} />
+              {mdmStatus?.has_data ? `${mdmStatus.records_count.toLocaleString()} Records Active` : 'No Dataset Connected'}
             </div>
-            <div className="note" style={{ marginTop: 4 }}>
-              Core survival algorithms continue running on station hardware without interruption.
+
+            {/* User Profile Badge (Reference Style) */}
+            <div className="header-user-badge">
+              <div className="user-avatar">
+                <span>EP</span>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', lineHeight: 1.1 }}>
+                <span style={{ fontSize: 12, fontWeight: 700, color: '#ffffff' }}>Emma Parson</span>
+                <span style={{ fontSize: 10, color: 'var(--text-dim)' }}>emma.pars@polar.gov</span>
+              </div>
+              <span style={{ fontSize: 9, color: 'var(--text-dim)', marginLeft: 2 }}>▼</span>
+            </div>
+
+            {/* Notification Bell */}
+            <div className="header-icon-btn" title="Operational Alerts" onClick={() => setPage('overview')}>
+              <span style={{ fontSize: 14 }}>🔔</span>
             </div>
           </div>
-        )}
+        </header>
 
-        {/* Render Active Page */}
-        {pages[page] ?? <OverviewPage onNavigate={setPage} />}
+        {/* Render Active Analytics Page */}
+        {pages[page] ?? <MdmOverviewPage onNavigate={setPage} />}
       </main>
     </>
   )

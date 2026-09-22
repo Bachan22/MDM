@@ -268,3 +268,304 @@ export interface BaselineComparison {
   }
   summary: string
 }
+
+// ---------------------------------------------------------------- MDM types ----
+export interface DatasetMetadata {
+  id: string
+  filename: string
+  upload_timestamp: number
+  rows_detected: number
+  rows_accepted: number
+  rows_rejected: number
+  columns_detected: string[]
+  columns_mapped: Record<string, string>
+  columns_ignored: string[]
+  duplicates_removed: number
+  missing_values_handled: number
+  start_date?: string
+  end_date?: string
+  stations: string[]
+  file_size_bytes: number
+}
+
+export interface UploadResponse {
+  success: boolean
+  dataset_id: string
+  filename: string
+  rows_detected: number
+  rows_accepted: number
+  rows_rejected: number
+  columns_detected: string[]
+  columns_mapped: Record<string, string>
+  columns_ignored: string[]
+  duplicates_removed: number
+  missing_values_handled: number
+  start_date?: string
+  end_date?: string
+  stations_detected: string[]
+  merge_status: string
+  message: string
+}
+
+export interface MdmStatus {
+  has_data: boolean
+  records_count: number
+  stations_count: number
+  stations: string[]
+  date_range_start?: string
+  date_range_end?: string
+  datasets_count: number
+  available_variables: string[]
+  datasets: DatasetMetadata[]
+}
+
+export interface EnergyAnalytics {
+  has_data: boolean
+  data_period: { start?: string; end?: string }
+  total_energy_kwh?: number
+  total_energy_unit: string
+  avg_power_kw?: number
+  peak_demand_kw?: number
+  min_demand_kw?: number
+  avg_equipment_load_kw?: number
+  trend_direction?: string
+  trend_pct?: number
+  consumption_by_station: Record<string, number>
+  time_series: Array<{
+    timestamp: string
+    energy_kwh: number
+    station: string
+    temperature_c?: number
+    equipment_load_kw?: number
+  }>
+  temp_vs_energy: Array<{
+    temperature_c: number
+    energy_kwh: number
+    station: string
+  }>
+  load_vs_energy: Array<{
+    equipment_load_kw: number
+    energy_kwh: number
+    station: string
+  }>
+  renewable_vs_consumption?: Array<{
+    timestamp: string
+    consumption_kwh: number
+    renewable_kwh: number
+    solar_kwh: number
+    wind_kwh: number
+  }>
+  renewable_available: boolean
+  ai_insights?: { findings: any[] }
+  missing_fields_notice: string[]
+}
+
+export interface EquipmentHealthRecord {
+  equipment_id: string
+  station: string
+  risk_level: string
+  main_signal: string
+  anomaly_count: number
+  last_observed: string
+  operating_temp_c?: number
+  current_load_kw?: number
+}
+
+export interface EquipmentHealthAnalytics {
+  has_data: boolean
+  records_analyzed: number
+  anomalies_detected: number
+  high_risk_signals_count: number
+  overall_risk_level: string
+  has_true_failure_labels: boolean
+  methodology_note: string
+  equipment_records: EquipmentHealthRecord[]
+  anomaly_timeline: Array<{
+    timestamp: string
+    equipment_id: string
+    station: string
+    metric_value?: number
+    temperature?: number
+    reason: string
+  }>
+  load_trend: Array<{
+    timestamp: string
+    load_kw?: number
+    station: string
+  }>
+  temp_vs_load: Array<{
+    temperature_c?: number
+    load_kw?: number
+    station: string
+  }>
+  ai_insights?: { findings: any[] }
+  missing_fields_notice: string[]
+}
+
+export interface StationResourceRiskItem {
+  station: string
+  resource: string
+  risk_level: string
+  main_driver: string
+  current_value: string
+  historical_average: string
+  evidence_text: string
+}
+
+export interface StationResourceRiskAnalytics {
+  has_data: boolean
+  stations_analyzed: number
+  high_risk_stations_count: number
+  moderate_risk_stations_count: number
+  low_risk_stations_count: number
+  overall_network_risk: string
+  station_risks: StationResourceRiskItem[]
+  station_risk_comparison: Array<{
+    station: string
+    overall_risk: string
+    risk_score: number
+    avg_energy_kw: number
+    recent_energy_kw: number
+    avg_battery_soc?: number
+    recent_battery_soc?: number
+    avg_temperature_c?: number
+  }>
+  battery_available: boolean
+  renewable_available: boolean
+  ai_insights?: { findings: any[] }
+  missing_fields_notice: string[]
+}
+
+export interface OverviewAnalytics {
+  has_data: boolean
+  dataset_status: MdmStatus
+  energy_summary: {
+    total_energy?: number
+    unit?: string
+    avg_power_kw?: number
+    peak_demand_kw?: number
+    min_demand_kw?: number
+    trend_direction?: string
+    trend_pct?: number
+  }
+  equipment_summary: {
+    records_analyzed?: number
+    anomalies_detected?: number
+    high_risk_signals_count?: number
+    overall_risk_level?: string
+    most_affected_equipment?: string
+    primary_signal?: string
+  }
+  resource_risk_summary: {
+    stations_analyzed?: number
+    high_risk_stations_count?: number
+    moderate_risk_stations_count?: number
+    overall_network_risk?: string
+    highest_risk_station?: string
+    primary_driver?: string
+  }
+  ai_management_insights: Array<{
+    category: string
+    title: string
+    finding: string
+    risk_level: string
+    primary_driver: string
+    recommendation: string
+    evidence: string
+    source: string
+  }>
+}
+
+// ---------------------------------------------------------------- MDM API calls ----
+export async function uploadDatasetFile(file: File, sheetName?: string): Promise<UploadResponse> {
+  const formData = new FormData()
+  formData.append('file', file)
+  const qs = sheetName ? `?sheet_name=${encodeURIComponent(sheetName)}` : ''
+  const res = await fetch(`${BASE}/data/upload${qs}`, {
+    method: 'POST',
+    body: formData,
+  })
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new Error(`Upload error (${res.status}): ${text.slice(0, 200)}`)
+  }
+  return res.json()
+}
+
+export const uploadDatasetCsv = uploadDatasetFile
+
+export function runAiAnalysis(analysisType: string, data: any, context?: any): Promise<any> {
+  return post('/analytics/ai', {
+    analysis_type: analysisType,
+    data,
+    context,
+  })
+}
+
+export interface AiAnalystResponse {
+  answer: string
+  key_metrics: string[]
+  evidence: string[]
+  recommendations: string[]
+  confidence: 'high' | 'medium' | 'low' | string
+  data_limitations: string[]
+  source?: string
+}
+
+export function askAiAnalyst(
+  message: string,
+  dashboardContext?: Record<string, any>,
+  history?: Array<{ role: string; content: string }>
+): Promise<AiAnalystResponse> {
+  return post<AiAnalystResponse>('/analytics/chat', {
+    message,
+    dashboard_context: dashboardContext || {},
+    history: history || [],
+  })
+}
+
+export function getMdmStatus(): Promise<MdmStatus> {
+  return get<MdmStatus>('/data/status')
+}
+
+export function clearMdmData(): Promise<{ success: boolean; message: string }> {
+  return req<{ success: boolean; message: string }>('/data/clear', { method: 'DELETE' })
+}
+
+export function getOverviewAnalytics(station?: string, startDate?: string, endDate?: string): Promise<OverviewAnalytics> {
+  const params = new URLSearchParams()
+  if (station && station !== 'All' && station !== 'All Stations') params.append('station', station)
+  if (startDate) params.append('start_date', startDate)
+  if (endDate) params.append('end_date', endDate)
+  const qs = params.toString() ? `?${params.toString()}` : ''
+  return get<OverviewAnalytics>(`/analytics/overview${qs}`)
+}
+
+export function getEnergyAnalytics(station?: string, startDate?: string, endDate?: string): Promise<EnergyAnalytics> {
+  const params = new URLSearchParams()
+  if (station && station !== 'All' && station !== 'All Stations') params.append('station', station)
+  if (startDate) params.append('start_date', startDate)
+  if (endDate) params.append('end_date', endDate)
+  const qs = params.toString() ? `?${params.toString()}` : ''
+  return get<EnergyAnalytics>(`/analytics/energy${qs}`)
+}
+
+export function getEquipmentAnalytics(station?: string, startDate?: string, endDate?: string): Promise<EquipmentHealthAnalytics> {
+  const params = new URLSearchParams()
+  if (station && station !== 'All' && station !== 'All Stations') params.append('station', station)
+  if (startDate) params.append('start_date', startDate)
+  if (endDate) params.append('end_date', endDate)
+  const qs = params.toString() ? `?${params.toString()}` : ''
+  return get<EquipmentHealthAnalytics>(`/analytics/equipment-health${qs}`)
+}
+
+export function getResourceRiskAnalytics(station?: string, startDate?: string, endDate?: string): Promise<StationResourceRiskAnalytics> {
+  const params = new URLSearchParams()
+  if (station && station !== 'All' && station !== 'All Stations') params.append('station', station)
+  if (startDate) params.append('start_date', startDate)
+  if (endDate) params.append('end_date', endDate)
+  const qs = params.toString() ? `?${params.toString()}` : ''
+  return get<StationResourceRiskAnalytics>(`/analytics/resource-risk${qs}`)
+}
+
+

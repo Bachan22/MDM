@@ -26,6 +26,8 @@ from .api import (
     connectivity_router, data_router, actions_router, models_router,
 )
 from .api.scenario_v1 import router as scenario_v1_router
+from .api.mdm_router import router as mdm_router
+from .services.mdm_storage_service import init_mdm_schema
 
 app = FastAPI(title="POLAR-EMS", version="1.0.0",
               description="Autonomy-Aware Polar Energy Management System — SIMULATION / DEMONSTRATION DATA")
@@ -46,6 +48,7 @@ def health_check() -> dict:
         "version": "1.0.0"
     }
 
+app.include_router(mdm_router, prefix="/api")
 app.include_router(scenario_v1_router, prefix="/api")
 
 for r in (station_router, sensors_router, weather_router, forecast_router,
@@ -58,6 +61,7 @@ for r in (station_router, sensors_router, weather_router, forecast_router,
 @app.on_event("startup")
 def startup() -> None:
     db.get_conn()
+    init_mdm_schema()
     
     # Load ML models into singleton memory cache
     try:

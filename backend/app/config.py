@@ -9,6 +9,24 @@ from __future__ import annotations
 
 import os
 
+def _load_env() -> None:
+    env_path = os.path.join(os.path.dirname(__file__), "..", ".env")
+    if os.path.exists(env_path):
+        with open(env_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    k, v = k.strip(), v.strip().strip("'\"")
+                    if k and k not in os.environ:
+                        os.environ[k] = v
+
+_load_env()
+
+AI_API_KEY = os.environ.get("AI_API_KEY") or os.environ.get("GROQ_API_KEY", "")
+AI_API_ENDPOINT = os.environ.get("AI_API_ENDPOINT", "https://api.groq.com/openai/v1/chat/completions")
+AI_MODEL = os.environ.get("AI_MODEL", "llama-3.3-70b-versatile")
+
 # ---------------------------------------------------------------- station ---
 STATION_ID = "maitri-sim"
 STATION_NAME = "MAITRI SIMULATION"
