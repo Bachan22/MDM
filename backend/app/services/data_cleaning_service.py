@@ -33,18 +33,22 @@ def parse_timestamp(val: Any) -> Optional[Tuple[float, str]]:
     if not s or s.lower() in ("nan", "nat", "null", "none", ""):
         return None
 
-    # Check numeric epoch timestamp
+    # Check numeric epoch timestamp or Excel serial date
     try:
         num = float(s)
-        if num > 1e11:  # ms
+        if num > 1e11:  # ms epoch
             dt = datetime.fromtimestamp(num / 1000.0, tz=timezone.utc)
-        elif num > 1e8:  # seconds
+            return dt.timestamp(), dt.strftime("%Y-%m-%d %H:%M:%S")
+        elif num > 1e8:  # sec epoch
             dt = datetime.fromtimestamp(num, tz=timezone.utc)
-        else:
-            # Possible Excel serial date (e.g. 45000.5)
+            return dt.timestamp(), dt.strftime("%Y-%m-%d %H:%M:%S")
+        elif 30000 <= num <= 100000:
+            # Valid Excel serial date range (1982 to 2173)
             dt = pd.to_datetime(num, unit="D", origin="1899-12-30").to_pydatetime()
             dt = dt.replace(tzinfo=timezone.utc)
-        return dt.timestamp(), dt.strftime("%Y-%m-%d %H:%M:%S")
+            return dt.timestamp(), dt.strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            return None
     except Exception:
         pass
 
@@ -288,6 +292,29 @@ def clean_csv_content(csv_text: str, default_station: str = "Station-A") -> Dict
     return clean_raw_rows(headers, rows, default_station)
 
 
+def find_header_row_and_data(df_raw: pd.DataFrame) -> Tuple[List[str], List[List[Any]]]:
+    """
+    Scans the top 10 rows of a raw pandas DataFrame to find the true header row
+    containing a recognizable timestamp/date column.
+    """
+    if df_raw.empty:
+        return [], []
+    headers = [str(c).strip() for c in df_raw.columns]
+    m_cols, _, _ = map_columns(headers)
+    if "timestamp" in m_cols.values():
+        return headers, df_raw.values.tolist()
+
+    for r_idx in range(min(10, len(df_raw))):
+        row_vals = [str(v).strip() for v in df_raw.iloc[r_idx].values if pd.notna(v)]
+        m_cols, _, _ = map_columns(row_vals)
+        if "timestamp" in m_cols.values():
+            headers = [str(v).strip() for v in df_raw.iloc[r_idx].values]
+            data_rows = df_raw.iloc[r_idx + 1:].values.tolist()
+            return headers, data_rows
+
+    return headers, df_raw.values.tolist()
+
+
 def clean_dataset_bytes(
     file_bytes: bytes,
     filename: str,
@@ -296,7 +323,7 @@ def clean_dataset_bytes(
 ) -> Dict[str, Any]:
     """
     Unified file processor accepting both CSV (.csv) and Excel (.xlsx, .xls) binary content.
-    Automatically detects and selects the best sheet for Excel files.
+    Scans, validates, cleans and merges telemetry records from all valid worksheets.
     """
     fn_lower = filename.lower()
     if fn_lower.endswith(".csv"):
@@ -310,39 +337,88 @@ def clean_dataset_bytes(
         return clean_csv_content(csv_text, default_station)
 
     if fn_lower.endswith(".xlsx") or fn_lower.endswith(".xls"):
+        engine = "openpyxl" if fn_lower.endswith(".xlsx") else "xlrd"
         try:
-            excel_file = pd.ExcelFile(io.BytesIO(file_bytes))
+            excel_file = pd.ExcelFile(io.BytesIO(file_bytes), engine=engine)
             sheet_names = excel_file.sheet_names
-
-            target_sheet = sheet_name
-            if not target_sheet or target_sheet not in sheet_names:
-                # Automatically pick the sheet with the most mapped canonical columns
-                best_sheet = sheet_names[0]
-                best_score = -1
-                for s_name in sheet_names:
-                    df_sample = pd.read_excel(excel_file, sheet_name=s_name, nrows=5)
-                    s_headers = [str(c) for c in df_sample.columns]
-                    m_cols, _, _ = map_columns(s_headers)
-                    score = len(m_cols)
-                    if "timestamp" in m_cols.values():
-                        score += 10
-                    if score > best_score:
-                        best_score = score
-                        best_sheet = s_name
-                target_sheet = best_sheet
-
-            df = pd.read_excel(excel_file, sheet_name=target_sheet)
-            headers = [str(c) for c in df.columns]
-            rows = df.values.tolist()
-            res = clean_raw_rows(headers, rows, default_station)
-            if res.get("stats"):
-                res["stats"]["excel_sheets"] = sheet_names
-                res["stats"]["selected_sheet"] = target_sheet
-            return res
+        except ImportError as ie:
+            return {
+                "success": False,
+                "error": "Excel processing is currently unavailable on the server. Please contact the system administrator."
+            }
         except Exception as e:
-            return {"success": False, "error": f"Failed to read Excel workbook: {str(e)}"}
+            return {
+                "success": False,
+                "error": f"Invalid Excel workbook or file is corrupted: {str(e)}"
+            }
+
+        target_sheets = [sheet_name] if (sheet_name and sheet_name in sheet_names) else sheet_names
+        all_sheet_records: List[Dict[str, Any]] = []
+        combined_stats: Dict[str, Any] = {
+            "rows_detected": 0,
+            "rows_accepted": 0,
+            "rows_rejected": 0,
+            "columns_detected": [],
+            "columns_mapped": {},
+            "columns_ignored": [],
+            "duplicates_removed": 0,
+            "missing_values_handled": 0,
+            "stations": set(),
+            "excel_sheets": sheet_names,
+            "processed_sheets": []
+        }
+
+        seen_global_signatures = set()
+
+        for s_name in target_sheets:
+            try:
+                df_raw = excel_file.parse(sheet_name=s_name)
+                if df_raw.empty:
+                    continue
+                headers, data_rows = find_header_row_and_data(df_raw)
+                res = clean_raw_rows(headers, data_rows, default_station)
+                if res.get("success") and res.get("records"):
+                    combined_stats["processed_sheets"].append(s_name)
+                    st = res["stats"]
+                    combined_stats["rows_detected"] += st["rows_detected"]
+                    combined_stats["rows_rejected"] += st["rows_rejected"]
+                    combined_stats["missing_values_handled"] += st["missing_values_handled"]
+                    combined_stats["duplicates_removed"] += st["duplicates_removed"]
+                    if not combined_stats["columns_detected"]:
+                        combined_stats["columns_detected"] = st.get("columns_detected", [])
+                        combined_stats["columns_mapped"] = st.get("columns_mapped", {})
+                        combined_stats["columns_ignored"] = st.get("columns_ignored", [])
+
+                    for rec in res["records"]:
+                        sig = (rec["station"], round(rec["ts"], 1))
+                        if sig in seen_global_signatures:
+                            combined_stats["duplicates_removed"] += 1
+                            continue
+                        seen_global_signatures.add(sig)
+                        all_sheet_records.append(rec)
+                        combined_stats["stations"].add(rec["station"])
+            except Exception as e:
+                continue
+
+        if not all_sheet_records:
+            return {
+                "success": False,
+                "error": "No valid telemetry data or required timestamp column found in Excel workbook."
+            }
+
+        all_sheet_records.sort(key=lambda r: r["ts"])
+        combined_stats["rows_accepted"] = len(all_sheet_records)
+        combined_stats["start_date"] = all_sheet_records[0]["timestamp"]
+        combined_stats["end_date"] = all_sheet_records[-1]["timestamp"]
+        combined_stats["stations"] = sorted(list(combined_stats["stations"]))
+
+        return {
+            "success": True,
+            "records": all_sheet_records,
+            "stats": combined_stats
+        }
 
     return {
         "success": False,
-        "error": f"Unsupported file extension in '{filename}'. Supported: .csv, .xlsx, .xls"
+        "error": f"Unsupported file extension in '{filename}'. Supported formats: .csv, .xlsx, .xls"
     }

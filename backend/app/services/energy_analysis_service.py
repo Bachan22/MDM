@@ -23,7 +23,11 @@ def calculate_energy_analytics(
             missing_fields_notice=["No records found matching the specified filters or no dataset uploaded."]
         )
 
-    # Filter records with energy_consumption
+    # Filter records with energy_consumption or equipment_load fallback
+    for r in records:
+        if r.get("energy_consumption") is None and r.get("equipment_load") is not None:
+            r["energy_consumption"] = r["equipment_load"]
+
     energy_records = [r for r in records if r.get("energy_consumption") is not None]
     if not energy_records:
         return EnergyAnalytics(

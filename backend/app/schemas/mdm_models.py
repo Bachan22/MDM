@@ -134,3 +134,36 @@ class OverviewAnalytics(BaseModel):
     equipment_summary: Dict[str, Any]
     resource_risk_summary: Dict[str, Any]
     ai_management_insights: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class AggregatedPoint(BaseModel):
+    key: str
+    label: str
+    full_date_label: str
+    value: float
+    record_count: int
+    is_peak: bool = False
+    is_lowest: bool = False
+    has_data: bool = True
+    change_pct: Optional[float] = None
+
+
+class PeriodAggregationResponse(BaseModel):
+    has_data: bool
+    period: str
+    period_label: str
+    anchor_date: str
+    current_total: float
+    previous_total: Optional[float] = None
+    trend_pct: Optional[float] = None
+    trend_direction: Optional[str] = None
+    avg_consumption: Optional[float] = None
+    peak_value: Optional[float] = None
+    peak_label: Optional[str] = None
+    lowest_value: Optional[float] = None
+    lowest_label: Optional[str] = None
+    record_count: int
+    points: List[AggregatedPoint] = Field(default_factory=list)
+    available_calendar_dates: List[str] = Field(default_factory=list)
+    missing_notice: Optional[str] = None
+

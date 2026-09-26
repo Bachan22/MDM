@@ -568,4 +568,54 @@ export function getResourceRiskAnalytics(station?: string, startDate?: string, e
   return get<StationResourceRiskAnalytics>(`/analytics/resource-risk${qs}`)
 }
 
+export interface AggregatedPoint {
+  key: string
+  label: string
+  full_date_label: string
+  value: number
+  record_count: number
+  is_peak: boolean
+  is_lowest: boolean
+  has_data: boolean
+  change_pct?: number | null
+}
+
+export interface PeriodAggregationResponse {
+  has_data: boolean
+  period: string
+  period_label: string
+  anchor_date: string
+  current_total: number
+  previous_total?: number | null
+  trend_pct?: number | null
+  trend_direction?: string | null
+  avg_consumption?: number | null
+  peak_value?: number | null
+  peak_label?: string | null
+  lowest_value?: number | null
+  lowest_label?: string | null
+  record_count: number
+  points: AggregatedPoint[]
+  available_calendar_dates: string[]
+  missing_notice?: string | null
+}
+
+export function getMdmAggregation(
+  station?: string,
+  period: string = 'monthly',
+  anchorDate?: string,
+  startDate?: string,
+  endDate?: string
+): Promise<PeriodAggregationResponse> {
+  const params = new URLSearchParams()
+  if (station && station !== 'All' && station !== 'All Stations') params.append('station', station)
+  if (period) params.append('period', period)
+  if (anchorDate) params.append('anchor_date', anchorDate)
+  if (startDate) params.append('start_date', startDate)
+  if (endDate) params.append('end_date', endDate)
+  const qs = params.toString() ? `?${params.toString()}` : ''
+  return get<PeriodAggregationResponse>(`/data/aggregate${qs}`)
+}
+
+
 

@@ -159,6 +159,37 @@ def test_api_endpoints_workflow():
     assert res_data["has_data"] is True
     assert res_data["stations_analyzed"] == 1
 
+    # Test deterministic aggregation endpoints: Monthly
+    agg_m = client.get("/api/data/aggregate?period=monthly&anchor_date=2026-09-01")
+    assert agg_m.status_code == 200
+    m_data = agg_m.json()
+    assert m_data["has_data"] is True
+    assert m_data["period"] == "monthly"
+    assert m_data["current_total"] == 1050.0  # 180 + 195 + 210 + 280 + 185
+    assert len(m_data["points"]) == 30  # September has 30 days
+    assert m_data["points"][0]["value"] == 1050.0  # 09-01 daily aggregated total
+    assert m_data["points"][0]["record_count"] == 5
+
+    # Test Weekly aggregation
+    agg_w = client.get("/api/data/aggregate?period=weekly&anchor_date=2026-09-01")
+    assert agg_w.status_code == 200
+    w_data = agg_w.json()
+    assert w_data["has_data"] is True
+    assert w_data["period"] == "weekly"
+    assert len(w_data["points"]) == 7
+    assert w_data["current_total"] == 1050.0
+
+    # Test Yearly aggregation
+    agg_y = client.get("/api/data/aggregate?period=yearly&anchor_date=2026-09-01")
+    assert agg_y.status_code == 200
+    y_data = agg_y.json()
+    assert y_data["has_data"] is True
+    assert y_data["period"] == "yearly"
+    assert len(y_data["points"]) == 12  # 12 months (Jan-Dec)
+    assert y_data["current_total"] == 1050.0
+    assert y_data["points"][8]["label"] == "Sep"
+    assert y_data["points"][8]["value"] == 1050.0
+
 
 if __name__ == "__main__":
     print("Running test_schema_mapping_and_financial_isolation...")
@@ -172,3 +203,4 @@ if __name__ == "__main__":
     print("Running test_api_endpoints_workflow...")
     test_api_endpoints_workflow()
     print("ALL TESTS PASSED SUCCESSFULLY!")
+

@@ -9,6 +9,7 @@ from ..schemas.mdm_models import (
     EquipmentHealthAnalytics,
     MdmStatus,
     OverviewAnalytics,
+    PeriodAggregationResponse,
     StationResourceRiskAnalytics,
     UploadResponse,
 )
@@ -16,6 +17,7 @@ from ..services.ai_analysis_service import AIAnalysisService
 from ..services.data_cleaning_service import clean_dataset_bytes
 from ..services.energy_analysis_service import calculate_energy_analytics
 from ..services.equipment_health_service import calculate_equipment_health_analytics
+from ..services.mdm_aggregation_service import aggregate_mdm_period
 from ..services.mdm_storage_service import (
     clear_mdm_data,
     get_mdm_status,
@@ -24,6 +26,7 @@ from ..services.mdm_storage_service import (
 from ..services.resource_risk_service import calculate_station_resource_risk
 
 router = APIRouter(tags=["MDM Analytics"])
+
 
 
 @router.post("/data/upload", response_model=UploadResponse)
@@ -84,7 +87,29 @@ def get_data_status():
     return get_mdm_status()
 
 
+@router.get("/data/aggregate", response_model=PeriodAggregationResponse)
+def get_data_aggregate(
+    station: Optional[str] = Query(None),
+    period: str = Query("monthly", description="weekly, monthly, yearly, range, or daily"),
+    anchor_date: Optional[str] = Query(None, description="Anchor reference date YYYY-MM-DD"),
+    start_date: Optional[str] = Query(None, description="Start date for range filtering"),
+    end_date: Optional[str] = Query(None, description="End date for range filtering")
+):
+    """
+    Computes deterministic aggregations for Weekly, Monthly, Yearly, and Range periods
+    directly from actual stored SQLite records without synthetic data.
+    """
+    return aggregate_mdm_period(
+        station=station,
+        period=period,
+        anchor_date=anchor_date,
+        start_date=start_date,
+        end_date=end_date
+    )
+
+
 @router.delete("/data/clear")
+
 def clear_data():
     """Clears all uploaded MDM records and datasets for clean demo reset."""
     clear_mdm_data()

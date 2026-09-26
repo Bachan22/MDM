@@ -1,21 +1,34 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useState, useRef, useCallback } from 'react'
 import {
   getMdmStatus,
   getOverviewAnalytics,
   getEnergyAnalytics,
   getEquipmentAnalytics,
   getResourceRiskAnalytics,
+  getMdmAggregation,
   MdmStatus,
   OverviewAnalytics,
   EnergyAnalytics,
   EquipmentHealthAnalytics,
   StationResourceRiskAnalytics,
+  PeriodAggregationResponse,
+  AggregatedPoint,
 } from '../api'
 import { MdmFilterBar } from '../components/MdmFilterBar'
 
 interface MdmOverviewPageProps {
   onNavigate: (page: string) => void
 }
+
+const MONTH_NAMES_SHORT = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+]
+
+const FULL_MONTH_NAMES = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December'
+]
 
 export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) => {
   const [status, setStatus] = useState<MdmStatus | null>(null)
@@ -30,16 +43,34 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
   const [startDate, setStartDate] = useState<string>('')
   const [endDate, setEndDate] = useState<string>('')
 
-  // Period toggle for hero chart: 'daily' | 'weekly' | 'monthly' | 'yearly'
+  // Period toggle for hero chart: 'weekly' | 'monthly' | 'yearly' | 'daily'
   const [periodMode, setPeriodMode] = useState<'daily' | 'weekly' | 'monthly' | 'yearly'>('monthly')
+  const [anchorDate, setAnchorDate] = useState<string>('')
+  const [periodData, setPeriodData] = useState<PeriodAggregationResponse | null>(null)
+  const [periodLoading, setPeriodLoading] = useState<boolean>(false)
+
+  // Convenience mode flags
+  const isYearly = periodMode === 'yearly'
+  const isMonthly = periodMode === 'monthly'
+  const isWeekly = periodMode === 'weekly'
+
+  // Chart interactivity & floating tooltip state
   const [activeBarIndex, setActiveBarIndex] = useState<number | null>(null)
+  const [hoveredPoint, setHoveredPoint] = useState<AggregatedPoint | null>(null)
+  const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
+  const chartContainerRef = useRef<HTMLDivElement>(null)
+
+  // Range dropdown toggle state
+  const [showRangeMenu, setShowRangeMenu] = useState<boolean>(false)
+
+  // Calendar state (Year and Month 1-12)
+  const [calendarYear, setCalendarYear] = useState<number>(2025)
+  const [calendarMonth, setCalendarMonth] = useState<number>(9) // 1 to 12
 
   // AI Quick Question
   const [quickQuestion, setQuickQuestion] = useState<string>('')
 
-  // Calendar state
-  const [calendarMonth, setCalendarMonth] = useState<number>(0) // 0 = Jan 2026 / current
-
+  // Initial status and overview load
   const loadData = async () => {
     try {
       setLoading(true)
@@ -57,6 +88,16 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
         setEnergyData(en)
         setEquipmentData(eq)
         setResourceData(rr)
+
+        // Set initial anchorDate from status range end if not set yet
+        if (!anchorDate && st.date_range_end) {
+          const dtStr = st.date_range_end.slice(0, 10)
+          setAnchorDate(dtStr)
+          const parsedYear = parseInt(dtStr.slice(0, 4), 10)
+          const parsedMonth = parseInt(dtStr.slice(5, 7), 10)
+          if (!isNaN(parsedYear)) setCalendarYear(parsedYear)
+          if (!isNaN(parsedMonth)) setCalendarMonth(parsedMonth)
+        }
       } else {
         setOverview(null)
         setEnergyData(null)
@@ -73,6 +114,121 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
   useEffect(() => {
     loadData()
   }, [selectedStation, startDate, endDate])
+
+  // Fetch deterministic period aggregation data whenever periodMode, anchorDate, station, or custom range changes
+  useEffect(() => {
+    let isMounted = true
+    const fetchAggregation = async () => {
+      if (!status || !status.has_data) return
+      try {
+        setPeriodLoading(true)
+        const agg = await getMdmAggregation(
+          selectedStation,
+          periodMode,
+          anchorDate,
+          periodMode === 'daily' ? startDate : undefined,
+          periodMode === 'daily' ? endDate : undefined
+        )
+        if (isMounted) {
+          setPeriodData(agg)
+        }
+      } catch (err: any) {
+        console.error('Aggregation query failed:', err)
+      } finally {
+        if (isMounted) setPeriodLoading(false)
+      }
+    }
+    fetchAggregation()
+    return () => {
+      isMounted = false
+    }
+  }, [status, selectedStation, periodMode, anchorDate, startDate, endDate])
+
+  // Calendar Navigation
+  // In yearly mode: navigation moves year by year.
+  // In all other modes: navigation moves month by month.
+  const handlePrevMonth = () => {
+    if (periodMode === 'yearly') {
+      const newYear = calendarYear - 1
+      setCalendarYear(newYear)
+      const newAnchor = `${newYear}-${String(calendarMonth).padStart(2, '0')}-01`
+      setAnchorDate(newAnchor)
+    } else {
+      let newMonth = calendarMonth - 1
+      let newYear = calendarYear
+      if (newMonth < 1) {
+        newMonth = 12
+        newYear -= 1
+      }
+      setCalendarYear(newYear)
+      setCalendarMonth(newMonth)
+      const newAnchor = `${newYear}-${String(newMonth).padStart(2, '0')}-01`
+      setAnchorDate(newAnchor)
+    }
+  }
+
+  const handleNextMonth = () => {
+    if (periodMode === 'yearly') {
+      const newYear = calendarYear + 1
+      setCalendarYear(newYear)
+      const newAnchor = `${newYear}-${String(calendarMonth).padStart(2, '0')}-01`
+      setAnchorDate(newAnchor)
+    } else {
+      let newMonth = calendarMonth + 1
+      let newYear = calendarYear
+      if (newMonth > 12) {
+        newMonth = 1
+        newYear += 1
+      }
+      setCalendarYear(newYear)
+      setCalendarMonth(newMonth)
+      const newAnchor = `${newYear}-${String(newMonth).padStart(2, '0')}-01`
+      setAnchorDate(newAnchor)
+    }
+  }
+
+  const handleSelectDay = (day: number) => {
+    const formatted = `${calendarYear}-${String(calendarMonth).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+    setAnchorDate(formatted)
+  }
+
+  // Yearly bar click — drill down to Monthly mode.
+  // bar.key format is "YYYY-MM" for yearly aggregation points.
+  const handleYearlyMonthClick = (bar: AggregatedPoint) => {
+    if (!bar.key || bar.key.length < 7) return
+    const yearFromKey = parseInt(bar.key.slice(0, 4), 10)
+    const monthFromKey = parseInt(bar.key.slice(5, 7), 10)
+    if (isNaN(yearFromKey) || isNaN(monthFromKey)) return
+    setCalendarYear(yearFromKey)
+    setCalendarMonth(monthFromKey)
+    const formatted = `${yearFromKey}-${String(monthFromKey).padStart(2, '0')}-01`
+    setAnchorDate(formatted)
+    setPeriodMode('monthly')
+  }
+
+  // Handle Range presets
+  const handleRangeSelect = (preset: 'last7' | 'last30' | 'last90' | 'custom') => {
+    setShowRangeMenu(false)
+    setPeriodMode('daily')
+
+    const baseDate = anchorDate ? new Date(anchorDate) : new Date()
+    if (preset === 'last7') {
+      const start = new Date(baseDate)
+      start.setDate(start.getDate() - 6)
+      setStartDate(start.toISOString().slice(0, 10))
+      setEndDate(baseDate.toISOString().slice(0, 10))
+    } else if (preset === 'last30') {
+      const start = new Date(baseDate)
+      start.setDate(start.getDate() - 29)
+      setStartDate(start.toISOString().slice(0, 10))
+      setEndDate(baseDate.toISOString().slice(0, 10))
+    } else if (preset === 'last90') {
+      const start = new Date(baseDate)
+      start.setDate(start.getDate() - 89)
+      setStartDate(start.toISOString().slice(0, 10))
+      setEndDate(baseDate.toISOString().slice(0, 10))
+    }
+  }
 
   if (loading && !overview && !status) {
     return (
@@ -129,53 +285,8 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
   const rr = overview?.resource_risk_summary
   const insights = overview?.ai_management_insights || []
 
-  // Derive monthly / aggregated bars for Hero Bar Chart from energy time series or stations
-  const timeSeries = energyData?.time_series || []
-  const chartBars = (() => {
-    if (timeSeries.length === 0) {
-      // Fallback sample buckets if only high-level summary is loaded
-      return [
-        { label: 'Jul', value: (es?.avg_power_kw || 120) * 0.85, isPeak: false },
-        { label: 'Aug', value: (es?.avg_power_kw || 120) * 0.95, isPeak: false },
-        { label: 'Sep', value: (es?.peak_demand_kw || (es?.avg_power_kw || 120) * 1.3), isPeak: true },
-        { label: 'Oct', value: (es?.avg_power_kw || 120) * 1.05, isPeak: false },
-        { label: 'Nov', value: (es?.avg_power_kw || 120) * 0.9, isPeak: false },
-        { label: 'Dec', value: (es?.avg_power_kw || 120) * 1.15, isPeak: false },
-        { label: 'Jan', value: (es?.avg_power_kw || 120) * 0.75, isPeak: false },
-        { label: 'Feb', value: (es?.avg_power_kw || 120) * 1.1, isPeak: false },
-        { label: 'Mar', value: (es?.avg_power_kw || 120) * 1.0, isPeak: false },
-        { label: 'Apr', value: (es?.avg_power_kw || 120) * 1.2, isPeak: false },
-        { label: 'May', value: (es?.avg_power_kw || 120) * 0.88, isPeak: false },
-        { label: 'Jun', value: (es?.avg_power_kw || 120) * 1.02, isPeak: false },
-      ]
-    }
-
-    // Bucket into up to 12 slots based on points
-    const step = Math.max(1, Math.floor(timeSeries.length / 12))
-    const buckets: Array<{ label: string; value: number; isPeak: boolean }> = []
-    let maxVal = -1
-    let peakIdx = 0
-
-    for (let i = 0; i < timeSeries.length; i += step) {
-      const slice = timeSeries.slice(i, i + step)
-      const avg = slice.reduce((a, b) => a + b.energy_kwh, 0) / slice.length
-      const dateStr = slice[0]?.timestamp || ''
-      const label = dateStr.length >= 10 ? dateStr.slice(5, 10) : `T${buckets.length + 1}`
-      if (avg > maxVal) {
-        maxVal = avg
-        peakIdx = buckets.length
-      }
-      buckets.push({ label, value: Math.round(avg * 10) / 10, isPeak: false })
-      if (buckets.length >= 12) break
-    }
-
-    if (buckets[peakIdx]) {
-      buckets[peakIdx].isPeak = true
-    }
-    return buckets
-  })()
-
-  // Calculate Hero Bar chart scaling
+  // Dynamic Chart Bars from deterministic Period Aggregation API
+  const chartBars: AggregatedPoint[] = periodData?.points || []
   const maxChartVal = Math.max(...chartBars.map((b) => b.value), 10) * 1.25
 
   // Station Distribution Donut Chart Segments
@@ -232,7 +343,7 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
     ]
   })()
 
-  // Calculate Health Score (100 - anomalies penalty)
+  // Calculate Health Score
   const healthScore = Math.max(40, Math.min(100, 100 - ((eq?.anomalies_detected || 0) * 4)))
 
   const handleAskQuickQuestion = (e: React.FormEvent) => {
@@ -242,6 +353,54 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
       onNavigate('analyst')
     }
   }
+
+  // Calendar calculation for current calendarYear and calendarMonth
+  const daysInMonth = new Date(calendarYear, calendarMonth, 0).getDate()
+  // Monday is 0, Sunday is 6
+  const firstDayOfWeek = (new Date(calendarYear, calendarMonth - 1, 1).getDay() + 6) % 7
+  const availableDatesSet = new Set(periodData?.available_calendar_dates || [])
+
+  const currentAnchorDay = anchorDate.startsWith(`${calendarYear}-${String(calendarMonth).padStart(2, '0')}`)
+    ? parseInt(anchorDate.slice(8, 10), 10)
+    : null
+
+  // ─── Metric totals, KPIs and trend labels ────────────────────────────────
+  const displayTotalEnergy = periodData ? periodData.current_total : (es?.total_energy || 0)
+  const displayTrendPct = periodData?.trend_pct != null ? Math.abs(periodData.trend_pct) : null
+  const displayTrendDir = periodData?.trend_direction || (es?.trend_direction || 'Stable')
+
+  // KPI values from deterministic backend aggregation
+  const avgConsumptionValue = periodData?.avg_consumption ?? null
+  const peakValue = periodData?.peak_value ?? null
+  const peakPointLabel = periodData?.peak_label ?? null
+  const lowestValue = periodData?.lowest_value ?? null
+  const lowestPointLabel = periodData?.lowest_label ?? null
+  const recordCount = periodData?.record_count ?? 0
+
+  // Period-adaptive labels
+  const avgConsumptionLabel = isYearly ? 'Avg / Month' : 'Avg / Day'
+  const peakLabel = isYearly ? 'Peak Month' : 'Peak Day'
+  const lowestLabel = isYearly ? 'Lowest Month' : 'Lowest Day'
+
+  // Trend comparison label — strictly sourced from actual data
+  const trendCompareLabel = isYearly
+    ? `vs ${calendarYear - 1}`
+    : isMonthly
+    ? `vs ${MONTH_NAMES_SHORT[(calendarMonth - 2 + 12) % 12]}`
+    : 'vs last period'
+
+  // Calendar header: yearly mode shows just the year
+  const calendarHeaderLabel = isYearly
+    ? `${calendarYear}`
+    : `${FULL_MONTH_NAMES[calendarMonth - 1]}, ${calendarYear}`
+
+  // Dynamic chart values
+  const chartBarsAll: AggregatedPoint[] = chartBars
+  // Y-axis ticks — dynamically scaled to actual max
+  const yAxisTicks = (() => {
+    const step = maxChartVal / 4
+    return [0, 1, 2, 3, 4].map((i) => Math.round(i * step))
+  })()
 
   return (
     <div>
@@ -281,232 +440,586 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
       <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 2fr) minmax(0, 1fr)', gap: 18, marginBottom: 18 }}>
         
         {/* Left Card: Hero Energy / Revenue Bar Chart */}
-        <div className="card" style={{ padding: '22px 26px', display: 'flex', flexDirection: 'column' }}>
+        <div className="card" style={{ padding: '22px 26px', display: 'flex', flexDirection: 'column', position: 'relative' }}>
           {/* Card Header & Controls */}
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16, flexWrap: 'wrap', gap: 12 }}>
             <div>
-              <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-dim)', letterSpacing: 0.4 }}>
-                Energy Consumption
-              </span>
-              <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, marginTop: 4 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-dim)', letterSpacing: 0.4 }}>
+                  Energy Consumption
+                </span>
+                {periodData?.period_label && (
+                  <span style={{ fontSize: 11, color: 'var(--accent)', background: 'rgba(56, 189, 248, 0.1)', padding: '2px 8px', borderRadius: 10, fontWeight: 600 }}>
+                    {periodData.period_label}
+                  </span>
+                )}
+                {isYearly && (
+                  <span style={{ fontSize: 10, color: 'var(--text-muted)', background: 'var(--bg-secondary)', padding: '2px 6px', borderRadius: 6, fontWeight: 500 }}>
+                    Monthly Aggregation
+                  </span>
+                )}
+                {isMonthly && (
+                  <span style={{ fontSize: 10, color: 'var(--text-muted)', background: 'var(--bg-secondary)', padding: '2px 6px', borderRadius: 6, fontWeight: 500 }}>
+                    Daily Aggregation
+                  </span>
+                )}
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, marginTop: 4, flexWrap: 'wrap' }}>
                 <span style={{ fontSize: 32, fontWeight: 700, fontFamily: 'var(--mono)', color: '#ffffff', letterSpacing: -0.8 }}>
-                  {es?.total_energy != null ? es.total_energy.toLocaleString() : '28,165'}
+                  {displayTotalEnergy.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 2 })}
                   <span style={{ fontSize: 14, color: 'var(--text-dim)', fontWeight: 500, marginLeft: 4 }}>
                     {es?.unit || 'kWh'}
                   </span>
                 </span>
-                <span
-                  style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: 4,
-                    background: es?.trend_direction === 'Increasing' ? 'rgba(245, 158, 11, 0.16)' : 'rgba(34, 197, 94, 0.16)',
-                    color: es?.trend_direction === 'Increasing' ? 'var(--warn)' : 'var(--good)',
-                    padding: '3px 9px',
-                    borderRadius: 14,
-                    fontSize: 11.5,
-                    fontWeight: 700,
-                  }}
-                >
-                  <span>{es?.trend_direction === 'Increasing' ? '▲' : '▼'}</span>
-                  <span>{es?.trend_pct ? `${Math.abs(es.trend_pct)}%` : '8.3%'}</span>
-                  <span style={{ color: 'var(--text-dim)', fontWeight: 500, marginLeft: 2 }}>vs last period</span>
-                </span>
+
+                {displayTrendPct != null ? (
+                  <span
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 4,
+                      background: displayTrendDir === 'Increasing' ? 'rgba(245, 158, 11, 0.16)' : 'rgba(34, 197, 94, 0.16)',
+                      color: displayTrendDir === 'Increasing' ? 'var(--warn)' : 'var(--good)',
+                      padding: '3px 9px',
+                      borderRadius: 14,
+                      fontSize: 11.5,
+                      fontWeight: 700,
+                    }}
+                  >
+                    <span>{displayTrendDir === 'Increasing' ? '▲' : '▼'}</span>
+                    <span>{displayTrendPct}%</span>
+                    <span style={{ color: 'var(--text-dim)', fontWeight: 500, marginLeft: 2 }}>{trendCompareLabel}</span>
+                  </span>
+                ) : (
+                  <span style={{ fontSize: 11, color: 'var(--text-muted)', background: 'var(--bg-secondary)', padding: '3px 8px', borderRadius: 10 }}>
+                    No previous-period comparison
+                  </span>
+                )}
+
+                {recordCount > 0 && (
+                  <span style={{ fontSize: 11, color: 'var(--text-dim)', marginLeft: 'auto' }}>
+                    <strong>{recordCount.toLocaleString()}</strong> records
+                  </span>
+                )}
               </div>
             </div>
 
             {/* Pill Toggles: Weekly / Monthly / Yearly / Range */}
-            <div className="pill-group">
-              <button
-                className={`pill-btn ${periodMode === 'weekly' ? 'active' : ''}`}
-                onClick={() => setPeriodMode('weekly')}
-              >
-                Weekly
-              </button>
-              <button
-                className={`pill-btn ${periodMode === 'monthly' ? 'active' : ''}`}
-                onClick={() => setPeriodMode('monthly')}
-              >
-                Monthly
-              </button>
-              <button
-                className={`pill-btn ${periodMode === 'yearly' ? 'active' : ''}`}
-                onClick={() => setPeriodMode('yearly')}
-              >
-                Yearly
-              </button>
-              <button
-                className={`pill-btn ${periodMode === 'daily' ? 'active' : ''}`}
-                onClick={() => setPeriodMode('daily')}
-              >
-                Range ▾
-              </button>
+            <div style={{ position: 'relative' }}>
+              <div className="pill-group">
+                <button
+                  className={`pill-btn ${periodMode === 'weekly' ? 'active' : ''}`}
+                  onClick={() => {
+                    setPeriodMode('weekly')
+                    setShowRangeMenu(false)
+                  }}
+                >
+                  Weekly
+                </button>
+                <button
+                  className={`pill-btn ${periodMode === 'monthly' ? 'active' : ''}`}
+                  onClick={() => {
+                    setPeriodMode('monthly')
+                    setShowRangeMenu(false)
+                  }}
+                >
+                  Monthly
+                </button>
+                <button
+                  className={`pill-btn ${periodMode === 'yearly' ? 'active' : ''}`}
+                  onClick={() => {
+                    setPeriodMode('yearly')
+                    setShowRangeMenu(false)
+                  }}
+                >
+                  Yearly
+                </button>
+                <button
+                  className={`pill-btn ${periodMode === 'daily' ? 'active' : ''}`}
+                  onClick={() => setShowRangeMenu((prev) => !prev)}
+                >
+                  Range ▾
+                </button>
+              </div>
+
+              {/* Range Dropdown Popup */}
+              {showRangeMenu && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    top: '100%',
+                    right: 0,
+                    marginTop: 6,
+                    background: 'var(--bg-popover)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 10,
+                    padding: '6px 0',
+                    zIndex: 50,
+                    boxShadow: '0 10px 28px rgba(0,0,0,0.6)',
+                    minWidth: 150,
+                  }}
+                >
+                  <div
+                    style={{ padding: '7px 14px', fontSize: 12, color: 'var(--text-main)', cursor: 'pointer', transition: 'background 0.15s' }}
+                    onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.06)')}
+                    onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+                    onClick={() => handleRangeSelect('last7')}
+                  >
+                    Last 7 Days
+                  </div>
+                  <div
+                    style={{ padding: '7px 14px', fontSize: 12, color: 'var(--text-main)', cursor: 'pointer', transition: 'background 0.15s' }}
+                    onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.06)')}
+                    onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+                    onClick={() => handleRangeSelect('last30')}
+                  >
+                    Last 30 Days
+                  </div>
+                  <div
+                    style={{ padding: '7px 14px', fontSize: 12, color: 'var(--text-main)', cursor: 'pointer', transition: 'background 0.15s' }}
+                    onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.06)')}
+                    onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+                    onClick={() => handleRangeSelect('last90')}
+                  >
+                    Last 90 Days
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
-          {/* SVG Hero Bar Chart with Diagonal Striped Hatched Pattern */}
-          <div style={{ flex: 1, minHeight: 220, position: 'relative', marginTop: 10 }}>
-            <svg width="100%" height="220" viewBox="0 0 680 220" preserveAspectRatio="none">
-              {/* Y-Axis Grid Lines & Ticks */}
-              {[0, 1500, 3000, 4500, 6000].map((tick, i) => {
-                const y = 180 - (i * 38)
-                return (
-                  <g key={i}>
-                    <line x1="36" y1={y} x2="680" y2={y} stroke="rgba(255,255,255,0.03)" strokeWidth="1" />
-                    <text x="24" y={y + 4} fill="var(--text-muted)" fontSize="10.5" textAnchor="end" fontFamily="var(--mono)">
-                      {Math.round((tick / 6000) * maxChartVal)}
-                    </text>
-                  </g>
-                )
-              })}
+          {/* SVG Hero Bar Chart */}
+          <div ref={chartContainerRef} style={{ flex: 1, minHeight: 220, position: 'relative', marginTop: 10 }}>
+            {periodLoading && (
+              <div style={{ position: 'absolute', top: 10, right: 10, fontSize: 11, color: 'var(--accent)', zIndex: 10 }}>
+                Refreshing telemetry...
+              </div>
+            )}
 
-              {/* Bars */}
-              {chartBars.map((bar, idx) => {
-                const barWidth = 36
-                const gap = (640 - (chartBars.length * barWidth)) / (chartBars.length + 1)
-                const x = 46 + idx * (barWidth + gap)
-                const barHeight = Math.max(16, (bar.value / maxChartVal) * 160)
-                const y = 180 - barHeight
-                const isSelected = activeBarIndex === idx || (activeBarIndex === null && bar.isPeak)
+            {chartBarsAll.length === 0 ? (
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: 200, color: 'var(--text-dim)' }}>
+                <span style={{ fontSize: 24, marginBottom: 8 }}>📉</span>
+                <span style={{ fontSize: 13, fontWeight: 600 }}>No telemetry available for this period</span>
+                <span style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 4 }}>
+                  Select another date, station, or upload historical records.
+                </span>
+              </div>
+            ) : (
+              <svg
+                width="100%"
+                height="220"
+                viewBox="0 0 680 220"
+                preserveAspectRatio="none"
+                onMouseLeave={() => {
+                  setActiveBarIndex(null)
+                  setHoveredPoint(null)
+                }}
+              >
+                {/* Y-Axis Grid Lines & Ticks — dynamically scaled */}
+                {yAxisTicks.map((tick, i) => {
+                  const y = 180 - (i * 38)
+                  return (
+                    <g key={i}>
+                      <line x1="36" y1={y} x2="680" y2={y} stroke="rgba(255,255,255,0.03)" strokeWidth="1" />
+                      <text x="30" y={y + 4} fill="var(--text-muted)" fontSize="9" textAnchor="end" fontFamily="var(--mono)">
+                        {tick >= 1000 ? `${(tick / 1000).toFixed(1)}k` : tick}
+                      </text>
+                    </g>
+                  )
+                })}
 
-                return (
-                  <g
-                    key={idx}
-                    onMouseEnter={() => setActiveBarIndex(idx)}
-                    onMouseLeave={() => setActiveBarIndex(null)}
-                    style={{ cursor: 'pointer' }}
-                  >
-                    {/* Bar Background Capsule */}
-                    <rect
-                      x={x}
-                      y={y}
-                      width={barWidth}
-                      height={barHeight}
-                      rx="8"
-                      ry="8"
-                      fill={isSelected ? '#38bdf8' : 'url(#diagonalHatch)'}
-                      stroke={isSelected ? '#38bdf8' : 'rgba(255,255,255,0.12)'}
-                      strokeWidth="1"
-                      style={{ transition: 'all 0.2s ease' }}
-                    />
+                {/* Bars */}
+                {chartBarsAll.map((bar, idx) => {
+                  const count = chartBarsAll.length
+                  // Responsive bar widths & spacing
+                  const barWidth = count <= 7 ? 56 : count <= 12 ? 38 : count <= 31 ? 14 : Math.max(6, Math.floor(580 / count) - 2)
+                  const totalBarsWidth = count * barWidth
+                  const gap = Math.max(2, (620 - totalBarsWidth) / (count + 1))
+                  const x = 40 + idx * (barWidth + gap)
+                  const barHeight = bar.value > 0 ? Math.max(12, (bar.value / maxChartVal) * 160) : 4
+                  const y = 180 - barHeight
+                  const isSelected = activeBarIndex === idx || (activeBarIndex === null && bar.is_peak)
 
-                    {/* Subtle Top Cap Line (Reference Style) */}
-                    <line
-                      x1={x + 6}
-                      y1={y + 4}
-                      x2={x + barWidth - 6}
-                      y2={y + 4}
-                      stroke={isSelected ? '#ffffff' : 'rgba(255,255,255,0.6)'}
-                      strokeWidth="2.5"
-                      strokeLinecap="round"
-                    />
+                  // Label filtering:
+                  // - Yearly: always show all 12 month labels
+                  // - Monthly (28-31 bars): show 1st, every 5th day, last day
+                  // - Weekly (7 bars): show all
+                  // - Range/large: show strategically
+                  let showLabel = true
+                  if (isYearly) {
+                    showLabel = true
+                  } else if (count > 20) {
+                    const keyParts = bar.key.split('-')
+                    const dayNum = keyParts.length >= 3 ? parseInt(keyParts[2], 10) : idx + 1
+                    showLabel = dayNum === 1 || dayNum % 5 === 0 || idx === count - 1 || isSelected
+                  } else if (count > 10) {
+                    showLabel = idx === 0 || idx === count - 1 || idx % 3 === 0 || isSelected
+                  }
 
-                    {/* Active Bar Highlight Tag / Bubble */}
-                    {isSelected && (
-                      <g>
-                        {/* Tag Pill */}
-                        <rect
-                          x={x + (barWidth / 2) - 24}
-                          y={y + 14}
-                          width="48"
-                          height="20"
-                          rx="10"
-                          fill="rgba(6, 7, 9, 0.75)"
-                        />
-                        <text
-                          x={x + (barWidth / 2)}
-                          y={y + 28}
-                          fill="#ffffff"
-                          fontSize="10"
-                          fontWeight="700"
-                          textAnchor="middle"
-                        >
-                          ▲ +12%
-                        </text>
-
-                        {/* Value label inside bar */}
-                        <text
-                          x={x + (barWidth / 2)}
-                          y={y + barHeight - 12}
-                          fill="#060709"
-                          fontSize="10.5"
-                          fontWeight="700"
-                          textAnchor="middle"
-                        >
-                          {Math.round(bar.value)}
-                        </text>
-                      </g>
-                    )}
-
-                    {/* X-Axis Label */}
-                    <text
-                      x={x + (barWidth / 2)}
-                      y="204"
-                      fill={isSelected ? '#ffffff' : 'var(--text-muted)'}
-                      fontSize="10.5"
-                      fontWeight={isSelected ? '700' : '500'}
-                      textAnchor="middle"
+                  return (
+                    <g
+                      key={idx}
+                      onMouseEnter={() => {
+                        setActiveBarIndex(idx)
+                        setHoveredPoint(bar)
+                        if (chartContainerRef.current) {
+                          const rect = chartContainerRef.current.getBoundingClientRect()
+                          const relX = (x + barWidth / 2) / 680 * rect.width
+                          const relY = (y / 220) * rect.height
+                          setTooltipPos({ x: relX, y: relY })
+                        }
+                      }}
+                      onClick={() => {
+                        if (periodMode === 'yearly') {
+                          handleYearlyMonthClick(bar)
+                        } else if (bar.key && bar.key.length === 10) {
+                          setAnchorDate(bar.key)
+                        }
+                      }}
+                      style={{ cursor: periodMode === 'yearly' || periodMode === 'monthly' ? 'pointer' : 'default' }}
                     >
-                      {bar.label}
-                    </text>
-                  </g>
-                )
-              })}
-            </svg>
+                      {/* Bar Background Capsule */}
+                      <rect
+                        x={x}
+                        y={y}
+                        width={barWidth}
+                        height={barHeight}
+                        rx={barWidth > 20 ? 8 : 3}
+                        ry={barWidth > 20 ? 8 : 3}
+                        fill={
+                          isSelected
+                            ? '#38bdf8'
+                            : bar.is_peak && bar.has_data
+                            ? 'rgba(56,189,248,0.5)'
+                            : bar.has_data
+                            ? 'url(#diagonalHatch)'
+                            : 'rgba(255,255,255,0.02)'
+                        }
+                        stroke={
+                          isSelected
+                            ? '#38bdf8'
+                            : bar.is_peak && bar.has_data
+                            ? 'rgba(56,189,248,0.7)'
+                            : bar.has_data
+                            ? 'rgba(255,255,255,0.12)'
+                            : 'rgba(255,255,255,0.04)'
+                        }
+                        strokeWidth="1"
+                        style={{ transition: 'all 0.15s ease' }}
+                      />
+
+                      {/* Top Cap Line */}
+                      {bar.value > 0 && (
+                        <line
+                          x1={x + Math.max(2, barWidth * 0.15)}
+                          y1={y + 3}
+                          x2={x + barWidth - Math.max(2, barWidth * 0.15)}
+                          y2={y + 3}
+                          stroke={isSelected ? '#ffffff' : bar.is_peak ? 'rgba(56,189,248,0.9)' : 'rgba(255,255,255,0.5)'}
+                          strokeWidth={barWidth > 20 ? 2 : 1.5}
+                          strokeLinecap="round"
+                        />
+                      )}
+
+                      {/* Peak star marker */}
+                      {bar.is_peak && bar.has_data && !isSelected && (
+                        <text x={x + barWidth / 2} y={y - 4} fill="#38bdf8" fontSize="9" textAnchor="middle">★</text>
+                      )}
+
+                      {/* No-data dash indicator */}
+                      {!bar.has_data && (
+                        <text x={x + barWidth / 2} y={178} fill="rgba(255,255,255,0.18)" fontSize="7" textAnchor="middle">–</text>
+                      )}
+
+                      {/* X-Axis Label */}
+                      {showLabel && (
+                        <text
+                          x={x + (barWidth / 2)}
+                          y="212"
+                          fill={isSelected ? '#ffffff' : bar.is_peak ? '#38bdf8' : 'var(--text-muted)'}
+                          fontSize={count > 20 ? "8.5" : count > 12 ? "9.5" : "10.5"}
+                          fontWeight={isSelected || bar.is_peak ? '700' : '500'}
+                          textAnchor="middle"
+                        >
+                          {bar.label}
+                        </text>
+                      )}
+                    </g>
+                  )
+                })}
+              </svg>
+            )}
+
+            {/* Non-overlapping Floating Tooltip Card */}
+            {hoveredPoint && (() => {
+              const containerW = chartContainerRef.current?.clientWidth || 600
+              const tooltipW = 175
+              const clampedLeft = Math.max(tooltipW / 2 + 4, Math.min(tooltipPos.x, containerW - tooltipW / 2 - 4))
+              const clampedTop = Math.max(10, tooltipPos.y - 12)
+              return (
+                <div
+                  style={{
+                    position: 'absolute',
+                    left: clampedLeft,
+                    top: clampedTop,
+                    transform: 'translate(-50%, -100%)',
+                    background: 'rgba(10, 12, 15, 0.96)',
+                    border: '1px solid var(--border-hover)',
+                    borderRadius: 8,
+                    padding: '10px 13px',
+                    pointerEvents: 'none',
+                    zIndex: 30,
+                    boxShadow: '0 8px 24px rgba(0,0,0,0.7)',
+                    whiteSpace: 'nowrap',
+                    backdropFilter: 'blur(8px)',
+                    minWidth: 145,
+                  }}
+                >
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 600, marginBottom: 2 }}>
+                    {hoveredPoint.full_date_label}
+                  </div>
+                  <div style={{ fontSize: 13, fontWeight: 700, fontFamily: 'var(--mono)', color: '#ffffff', marginTop: 2 }}>
+                    {hoveredPoint.has_data
+                      ? hoveredPoint.value.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 2 })
+                      : 'No Data'}
+                    {' '}
+                    <span style={{ fontSize: 10.5, color: 'var(--text-dim)', fontWeight: 500 }}>
+                      {hoveredPoint.has_data ? 'kWh' : ''}
+                    </span>
+                  </div>
+                  {hoveredPoint.has_data && hoveredPoint.record_count > 0 && (
+                    <div style={{ fontSize: 10.5, color: 'var(--text-dim)', marginTop: 3 }}>
+                      {hoveredPoint.record_count.toLocaleString()} record{hoveredPoint.record_count > 1 ? 's' : ''}
+                    </div>
+                  )}
+                  {!hoveredPoint.has_data && (
+                    <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 3, fontStyle: 'italic' }}>
+                      No telemetry recorded
+                    </div>
+                  )}
+                  {hoveredPoint.change_pct != null && (
+                    <div
+                      style={{
+                        fontSize: 10.5,
+                        fontWeight: 700,
+                        color: hoveredPoint.change_pct >= 0 ? 'var(--warn)' : 'var(--good)',
+                        marginTop: 4,
+                      }}
+                    >
+                      {hoveredPoint.change_pct >= 0 ? '▲ +' : '▼ '}
+                      {Math.abs(hoveredPoint.change_pct)}%{' '}
+                      <span style={{ color: 'var(--text-dim)', fontWeight: 500 }}>
+                        vs {isYearly ? 'prior month' : 'prior day'}
+                      </span>
+                    </div>
+                  )}
+                  {isYearly && hoveredPoint.has_data && (
+                    <div style={{ fontSize: 9, color: 'var(--accent)', marginTop: 5, fontStyle: 'italic' }}>
+                      ↙ Click to drill down to month
+                    </div>
+                  )}
+                  {isMonthly && hoveredPoint.has_data && (
+                    <div style={{ fontSize: 9, color: 'var(--text-muted)', marginTop: 5, fontStyle: 'italic' }}>
+                      ↙ Click to set anchor date
+                    </div>
+                  )}
+                </div>
+              )
+            })()}
           </div>
+
+          {/* KPI Strip below chart */}
+          {periodData && periodData.has_data && (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, marginTop: 14, paddingTop: 14, borderTop: '1px solid var(--border-subtle)' }}>
+              {/* Annual/Monthly/Period Total */}
+              <div style={{ flex: '1 1 120px', minWidth: 100 }}>
+                <div style={{ fontSize: 9.5, color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 600 }}>
+                  {isYearly ? 'Annual Total' : isMonthly ? 'Monthly Total' : 'Period Total'}
+                </div>
+                <div style={{ fontSize: 15, fontWeight: 700, fontFamily: 'var(--mono)', color: '#ffffff', marginTop: 2 }}>
+                  {displayTotalEnergy.toLocaleString(undefined, { maximumFractionDigits: 1 })} kWh
+                </div>
+              </div>
+              {/* Avg */}
+              {avgConsumptionValue != null && (
+                <div style={{ flex: '1 1 120px', minWidth: 100 }}>
+                  <div style={{ fontSize: 9.5, color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 600 }}>{avgConsumptionLabel}</div>
+                  <div style={{ fontSize: 15, fontWeight: 700, fontFamily: 'var(--mono)', color: '#ffffff', marginTop: 2 }}>
+                    {avgConsumptionValue.toLocaleString(undefined, { maximumFractionDigits: 1 })} kWh
+                  </div>
+                </div>
+              )}
+              {/* Peak */}
+              {peakValue != null && (
+                <div style={{ flex: '1 1 120px', minWidth: 100 }}>
+                  <div style={{ fontSize: 9.5, color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 600 }}>{peakLabel}</div>
+                  <div style={{ fontSize: 15, fontWeight: 700, fontFamily: 'var(--mono)', color: '#38bdf8', marginTop: 2 }}>
+                    {peakValue.toLocaleString(undefined, { maximumFractionDigits: 1 })} kWh
+                  </div>
+                  {peakPointLabel && <div style={{ fontSize: 10, color: 'var(--accent)', marginTop: 1 }}>{peakPointLabel}</div>}
+                </div>
+              )}
+              {/* Lowest */}
+              {lowestValue != null && (
+                <div style={{ flex: '1 1 120px', minWidth: 100 }}>
+                  <div style={{ fontSize: 9.5, color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 600 }}>{lowestLabel}</div>
+                  <div style={{ fontSize: 15, fontWeight: 700, fontFamily: 'var(--mono)', color: 'var(--text-dim)', marginTop: 2 }}>
+                    {lowestValue.toLocaleString(undefined, { maximumFractionDigits: 1 })} kWh
+                  </div>
+                  {lowestPointLabel && <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 1 }}>{lowestPointLabel}</div>}
+                </div>
+              )}
+              {/* Records */}
+              {recordCount > 0 && (
+                <div style={{ flex: '1 1 100px', minWidth: 80 }}>
+                  <div style={{ fontSize: 9.5, color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 600 }}>Records</div>
+                  <div style={{ fontSize: 15, fontWeight: 700, fontFamily: 'var(--mono)', color: '#ffffff', marginTop: 2 }}>
+                    {recordCount.toLocaleString()}
+                  </div>
+                </div>
+              )}
+              {/* Trend */}
+              <div style={{ flex: '1 1 120px', minWidth: 100 }}>
+                <div style={{ fontSize: 9.5, color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 600 }}>Trend ({trendCompareLabel})</div>
+                <div style={{ marginTop: 2 }}>
+                  {displayTrendPct != null ? (
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3,
+                      background: displayTrendDir === 'Increasing' ? 'rgba(245,158,11,0.16)' : 'rgba(34,197,94,0.16)',
+                      color: displayTrendDir === 'Increasing' ? 'var(--warn)' : 'var(--good)',
+                      padding: '3px 8px', borderRadius: 12, fontSize: 12, fontWeight: 700 }}>
+                      {displayTrendDir === 'Increasing' ? '▲' : '▼'} {displayTrendPct}%
+                    </span>
+                  ) : (
+                    <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>No comparison</span>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
-        {/* Right Card: Interactive Calendar Widget (Reference Design) */}
+        {/* Right Card: Interactive Calendar Widget */}
         <div className="card calendar-card" style={{ display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
           <div>
             {/* Calendar Header with Navigation */}
             <div className="calendar-header">
-              <div className="calendar-nav-btn" onClick={() => setCalendarMonth((m) => m - 1)} title="Previous Month">
+              <div
+                className="calendar-nav-btn"
+                onClick={handlePrevMonth}
+                title={isYearly ? 'Previous Year' : 'Previous Month'}
+              >
                 ‹
               </div>
               <span style={{ fontSize: 13.5, fontWeight: 700, color: '#ffffff' }}>
-                {calendarMonth === 0 ? 'January, 2026' : calendarMonth === 1 ? 'February, 2026' : 'December, 2025'}
+                {calendarHeaderLabel}
               </span>
-              <div className="calendar-nav-btn" onClick={() => setCalendarMonth((m) => m + 1)} title="Next Month">
+              <div
+                className="calendar-nav-btn"
+                onClick={handleNextMonth}
+                title={isYearly ? 'Next Year' : 'Next Month'}
+              >
                 ›
               </div>
             </div>
 
-            {/* Days of Week Headers */}
-            <div className="calendar-grid" style={{ marginBottom: 6 }}>
-              {['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((d, i) => (
-                <div key={i} className="calendar-day-header">
-                  {d}
+            {/* Yearly Mode: month grid; Non-yearly: day grid */}
+            {isYearly ? (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 5, padding: '8px 2px' }}>
+                {MONTH_NAMES_SHORT.map((mName, mIdx) => {
+                  const mNum = mIdx + 1
+                  const ymKey = `${calendarYear}-${String(mNum).padStart(2, '0')}`
+                  const hasData = chartBarsAll.some((b) => b.key === ymKey && b.has_data)
+                  const isPeak = chartBarsAll.some((b) => b.key === ymKey && b.is_peak)
+                  const isCurrentCalMonth = calendarMonth === mNum
+                  return (
+                    <div
+                      key={mIdx}
+                      onClick={() => {
+                        setCalendarMonth(mNum)
+                        const formatted = `${calendarYear}-${String(mNum).padStart(2, '0')}-01`
+                        setAnchorDate(formatted)
+                        setPeriodMode('monthly')
+                      }}
+                      style={{
+                        padding: '10px 4px',
+                        textAlign: 'center',
+                        fontSize: 12,
+                        fontWeight: isCurrentCalMonth || isPeak ? 700 : 500,
+                        color: isPeak ? '#38bdf8' : isCurrentCalMonth ? '#ffffff' : hasData ? 'var(--text-dim)' : 'var(--text-muted)',
+                        background: isCurrentCalMonth
+                          ? 'rgba(56, 189, 248, 0.18)'
+                          : isPeak
+                          ? 'rgba(56, 189, 248, 0.08)'
+                          : hasData
+                          ? 'var(--bg-secondary)'
+                          : 'transparent',
+                        border: isCurrentCalMonth
+                          ? '1px solid rgba(56, 189, 248, 0.5)'
+                          : hasData
+                          ? '1px solid var(--border)'
+                          : '1px solid transparent',
+                        borderRadius: 8,
+                        cursor: 'pointer',
+                        transition: 'all 0.15s',
+                        opacity: hasData ? 1 : 0.4,
+                      }}
+                      title={hasData ? `${FULL_MONTH_NAMES[mIdx]} ${calendarYear}: click to inspect` : `No data for ${mName} ${calendarYear}`}
+                    >
+                      {mName}
+                      {hasData && (
+                        <div style={{ width: 4, height: 4, borderRadius: '50%', background: isPeak ? '#38bdf8' : 'var(--accent)', margin: '3px auto 0' }} />
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            ) : (
+              <>
+                {/* Days of Week Headers */}
+                <div className="calendar-grid" style={{ marginBottom: 6 }}>
+                  {['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((d, i) => (
+                    <div key={i} className="calendar-day-header">{d}</div>
+                  ))}
                 </div>
-              ))}
-            </div>
 
-            {/* Calendar Cells with Hatched Empty Days & Active Day */}
-            <div className="calendar-grid">
-              {/* Previous month filler cells (hatched texture) */}
-              <div className="calendar-cell striped" />
-              <div className="calendar-cell striped" />
-              <div className="calendar-cell striped" />
+                {/* Calendar Cells */}
+                <div className="calendar-grid">
+                  {Array.from({ length: firstDayOfWeek }).map((_, i) => (
+                    <div key={`fill-${i}`} className="calendar-cell striped" />
+                  ))}
 
-              {/* Days 1 to 30 */}
-              {Array.from({ length: 30 }, (_, i) => i + 1).map((day) => {
-                const isActive = day === 11 // Reference design day 11
-                return (
-                  <div
-                    key={day}
-                    className={`calendar-cell ${isActive ? 'active' : ''}`}
-                    onClick={() => {}}
-                    title={`Day ${day}: Telemetry normal`}
-                  >
-                    {day}
-                  </div>
-                )
-              })}
+                  {Array.from({ length: daysInMonth }, (_, i) => i + 1).map((day) => {
+                    const dayStr = `${calendarYear}-${String(calendarMonth).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+                    const isActive = currentAnchorDay === day
+                    const hasTelemetry = availableDatesSet.has(dayStr)
+                    return (
+                      <div
+                        key={day}
+                        className={`calendar-cell ${isActive ? 'active' : ''}`}
+                        onClick={() => handleSelectDay(day)}
+                        style={{
+                          position: 'relative',
+                          border: hasTelemetry && !isActive ? '1px solid rgba(56, 189, 248, 0.25)' : undefined,
+                        }}
+                        title={hasTelemetry ? `${dayStr}: Telemetry recorded.` : `${dayStr}: No telemetry.`}
+                      >
+                        {day}
+                        {hasTelemetry && !isActive && (
+                          <span
+                            style={{ position: 'absolute', bottom: 2, width: 3, height: 3, borderRadius: '50%', background: 'var(--accent)' }}
+                          />
+                        )}
+                      </div>
+                    )
+                  })}
 
-              {/* Next month filler cells */}
-              <div className="calendar-cell striped" />
-              <div className="calendar-cell striped" />
-            </div>
+                  {Array.from({ length: (7 - ((firstDayOfWeek + daysInMonth) % 7)) % 7 }).map((_, i) => (
+                    <div key={`trail-${i}`} className="calendar-cell striped" />
+                  ))}
+                </div>
+              </>
+            )}
           </div>
 
           {/* Bottom Peak Load Metric Strip */}
@@ -524,14 +1037,20 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
           >
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <span style={{ fontSize: 16 }}>📊</span>
-              <span style={{ fontSize: 18, fontWeight: 700, fontFamily: 'var(--mono)', color: '#ffffff' }}>
-                ${es?.peak_demand_kw ? es.peak_demand_kw.toLocaleString() : '1,434'}
-              </span>
+              <div>
+                <div style={{ fontSize: 9.5, color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 600 }}>
+                  {peakLabel}
+                </div>
+                <div style={{ fontSize: 15, fontWeight: 700, fontFamily: 'var(--mono)', color: '#ffffff' }}>
+                  {peakValue != null ? `${peakValue.toLocaleString(undefined, { maximumFractionDigits: 1 })} kWh` : 'No Data'}
+                </div>
+              </div>
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 4, color: 'var(--good)', fontSize: 11.5, fontWeight: 700 }}>
-              <span>▲</span>
-              <span>12.4%</span>
-            </div>
+            {peakPointLabel && (
+              <div style={{ fontSize: 11, color: 'var(--accent)', fontWeight: 600, textAlign: 'right' }}>
+                {peakPointLabel}
+              </div>
+            )}
           </div>
         </div>
 
@@ -584,10 +1103,10 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
                 <div style={{ fontSize: 10.5, color: 'var(--text-muted)', fontWeight: 600 }}>Energy Trend</div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4 }}>
                   <span style={{ fontSize: 16, fontWeight: 700, fontFamily: 'var(--mono)', color: '#ffffff' }}>
-                    {es?.trend_pct ? Math.abs(es.trend_pct) : '7'}
+                    {displayTrendPct != null ? displayTrendPct : '7'}
                   </span>
-                  <span className={`badge ${es?.trend_direction === 'Increasing' ? 'warn' : 'safe'}`} style={{ fontSize: 9.5, padding: '2px 6px' }}>
-                    {es?.trend_direction || 'Stable'}
+                  <span className={`badge ${displayTrendDir === 'Increasing' ? 'warn' : 'safe'}`} style={{ fontSize: 9.5, padding: '2px 6px' }}>
+                    {displayTrendDir}
                   </span>
                 </div>
               </div>
@@ -652,7 +1171,7 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
                 Station Distribution
               </h3>
               <div className="pill-group" style={{ padding: '2px 8px', fontSize: 11 }}>
-                <span>Last 30 Days ▾</span>
+                <span>{periodData?.period_label || 'Active Period'}</span>
               </div>
             </div>
 
@@ -666,7 +1185,6 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
                   {/* Colored Segments */}
                   {donutData.map((d, idx) => {
                     const strokeDash = `${(d.pct / 100) * 238} 238`
-                    // Approximate rotation offset
                     let prevOffset = 0
                     for (let i = 0; i < idx; i++) {
                       prevOffset += (donutData[i].pct / 100) * 360
@@ -704,7 +1222,7 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
                   }}
                 >
                   <span style={{ fontSize: 14, fontWeight: 700, fontFamily: 'var(--mono)', color: '#ffffff' }}>
-                    {es?.total_energy ? `${Math.round(es.total_energy).toLocaleString()}` : '28,165'}
+                    {displayTotalEnergy ? `${Math.round(displayTotalEnergy).toLocaleString()}` : '0'}
                   </span>
                   <span style={{ fontSize: 10, color: 'var(--text-muted)', textTransform: 'uppercase' }}>
                     Total
@@ -751,7 +1269,7 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
           </div>
         </div>
 
-        {/* Card 3: Equipment Health & Telemetry Anomalies ("Invoices") */}
+        {/* Card 3: Equipment Health & Telemetry Anomalies */}
         <div className="card" style={{ display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
           <div>
             {/* Header */}
@@ -864,7 +1382,7 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
       </div>
 
       {/* ==========================================================================
-          CROSS-SYSTEM RISK OVERVIEW STRIP (Connected Analytics Modules)
+          CROSS-SYSTEM RISK OVERVIEW STRIP
           ========================================================================== */}
       <div
         className="card"
