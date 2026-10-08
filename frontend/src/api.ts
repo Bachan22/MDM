@@ -317,6 +317,12 @@ export interface MdmStatus {
   datasets_count: number
   available_variables: string[]
   datasets: DatasetMetadata[]
+  missing_values_count?: number
+  missing_values_pct?: number
+  data_quality_pct?: number
+  valid_records_count?: number
+  rows_detected_count?: number
+  rows_rejected_count?: number
 }
 
 export interface EnergyAnalytics {
@@ -406,7 +412,10 @@ export interface StationResourceRiskItem {
   station: string
   resource: string
   risk_level: string
+  current_risk_level?: string
+  forecast_risk_level?: string | null
   main_driver: string
+  forecast_driver_reason?: string | null
   current_value: string
   historical_average: string
   evidence_text: string
@@ -419,16 +428,29 @@ export interface StationResourceRiskAnalytics {
   moderate_risk_stations_count: number
   low_risk_stations_count: number
   overall_network_risk: string
+  network_current_risk?: string
+  network_forecast_risk?: string | null
+  forecast_horizon_hours?: number
+  forecast_summary?: string | null
   station_risks: StationResourceRiskItem[]
   station_risk_comparison: Array<{
     station: string
     overall_risk: string
-    risk_score: number
+    current_risk?: string
+    forecast_risk?: string
+    risk_score?: number
     avg_energy_kw: number
-    recent_energy_kw: number
+    recent_energy_kw?: number
+    current_energy_kw?: number
+    forecast_peak_kw?: number
+    forecast_avg_kw?: number
     avg_battery_soc?: number
     recent_battery_soc?: number
+    current_battery_soc?: number
+    battery_soc?: number
+    renewable_share_pct?: number
     avg_temperature_c?: number
+    temperature_c?: number
   }>
   battery_available: boolean
   renewable_available: boolean
@@ -474,6 +496,13 @@ export interface OverviewAnalytics {
     evidence: string
     source: string
   }>
+  dynamic_ai_insights?: {
+    status: string
+    message?: string
+    insights: string[]
+    summary?: string
+    source?: string
+  }
 }
 
 // ---------------------------------------------------------------- MDM API calls ----
@@ -559,11 +588,19 @@ export function getEquipmentAnalytics(station?: string, startDate?: string, endD
   return get<EquipmentHealthAnalytics>(`/analytics/equipment-health${qs}`)
 }
 
-export function getResourceRiskAnalytics(station?: string, startDate?: string, endDate?: string): Promise<StationResourceRiskAnalytics> {
+export function getResourceRiskAnalytics(
+  station?: string,
+  startDate?: string,
+  endDate?: string,
+  anchorDate?: string,
+  horizon: number = 24
+): Promise<StationResourceRiskAnalytics> {
   const params = new URLSearchParams()
   if (station && station !== 'All' && station !== 'All Stations') params.append('station', station)
   if (startDate) params.append('start_date', startDate)
   if (endDate) params.append('end_date', endDate)
+  if (anchorDate) params.append('anchor_date', anchorDate)
+  if (horizon) params.append('horizon', String(horizon))
   const qs = params.toString() ? `?${params.toString()}` : ''
   return get<StationResourceRiskAnalytics>(`/analytics/resource-risk${qs}`)
 }
@@ -616,6 +653,189 @@ export function getMdmAggregation(
   const qs = params.toString() ? `?${params.toString()}` : ''
   return get<PeriodAggregationResponse>(`/data/aggregate${qs}`)
 }
+
+export interface WeatherLoadForecastPoint {
+  timestamp: string
+  predicted_load_kw: number
+  temperature?: number | null
+  wind_speed?: number | null
+}
+
+export interface HistoricalTelemetryPoint {
+  timestamp: string
+  actual_load_kw: number
+  temperature?: number | null
+  wind_speed?: number | null
+}
+
+export interface WeatherLoadForecastResponse {
+  status: 'success' | 'insufficient_data' | 'empty_dataset' | string
+  message?: string | null
+  model: string
+  station: string
+  generated_at: string
+  forecast_horizon_hours: number
+  current_load_kw?: number | null
+  predicted_peak_kw?: number | null
+  predicted_average_kw?: number | null
+  predicted_min_kw?: number | null
+  peak_time?: string | null
+  recent_load_avg_kw?: number | null
+  recent_load_peak_kw?: number | null
+  trend?: string | null
+  records_available?: number | null
+  records_required?: number | null
+  historical_points: HistoricalTelemetryPoint[]
+  forecast_points: WeatherLoadForecastPoint[]
+  ai_interpretation?: {
+    status?: string
+    interpretation?: string
+    main_drivers?: string[]
+    management_insight?: string
+    source?: string
+  } | null
+  model_status?: {
+    model_name: string
+    status: string
+    model_type: string
+    algorithm: string
+    target: string
+    forecast_horizon: string
+    features_count: number
+    features_list?: string[]
+    test_metrics?: {
+      MAE?: number
+      RMSE?: number
+      MAPE_percent?: number
+      R2?: number
+    }
+    baseline_mae_improvement_percent?: number
+  } | null
+}
+
+export function getWeatherLoadForecast(
+  station?: string,
+  anchorDate?: string,
+  horizon: number = 24
+): Promise<WeatherLoadForecastResponse> {
+  const params = new URLSearchParams()
+  if (station && station !== 'All' && station !== 'All Stations') params.append('station', station)
+  if (anchorDate) params.append('anchor_date', anchorDate)
+  if (horizon) params.append('horizon', String(horizon))
+  const qs = params.toString() ? `?${params.toString()}` : ''
+  return get<WeatherLoadForecastResponse>(`/forecast/weather-load${qs}`)
+}
+
+export interface EnergyRiskWindow {
+  window: string
+  peak_kw?: number | null
+  reason: string
+  severity?: string
+}
+
+export interface EnergyChargingWindow {
+  window: string
+  action: string
+  favorable_factors?: string[]
+}
+
+export interface EnergyReserveAIResponse {
+  status: 'success' | 'fallback' | 'data_required' | string
+  station: string
+  forecast_horizon_hours: number
+  anchor_date?: string | null
+  energy_status: 'NORMAL' | 'WATCH' | 'CONSERVE' | 'CRITICAL' | string
+  status_badge_color: string
+  energy_situation: string
+  forecast_impact: string
+  reserve_recommendation: string
+  critical_window?: EnergyRiskWindow | null
+  charging_opportunity?: EnergyChargingWindow | null
+  recommended_actions: string[]
+  why: string
+  evidence: {
+    forecast_peak_kw?: number | null
+    forecast_avg_kw?: number | null
+    recent_avg_kw?: number | null
+    current_load_kw?: number | null
+    current_reserve_pct?: number | null
+    estimated_days_remaining?: number | null
+    renewable_contribution_pct?: number | null
+    solar_status?: string | null
+    wind_status?: string | null
+    temperature_c?: number | null
+    wind_speed_m_s?: number | null
+  }
+  signal_availability: Record<string, string>
+  missing_data_notices: string[]
+  source: string
+}
+
+export function getEnergyReserveAIAnalysis(
+  station?: string,
+  anchorDate?: string,
+  horizon: number = 24
+): Promise<EnergyReserveAIResponse> {
+  const params = new URLSearchParams()
+  if (station && station !== 'All' && station !== 'All Stations') params.append('station', station)
+  if (anchorDate) params.append('anchor_date', anchorDate)
+  if (horizon) params.append('horizon', String(horizon))
+  const qs = params.toString() ? `?${params.toString()}` : ''
+  return get<EnergyReserveAIResponse>(`/analytics/energy-reserve/ai${qs}`)
+}
+
+export interface EnergyTrendAnalysis {
+  has_data: boolean
+  consumption_trend_pct?: number | null
+  consumption_trend_direction: string
+  average_demand_kw?: number | null
+  peak_demand_kw?: number | null
+  min_demand_kw?: number | null
+  demand_stress_pct?: number | null
+  highest_consuming_station?: string | null
+  station_shares: Record<string, number>
+  equipment_load_change_pct?: number | null
+  equipment_association_note?: string | null
+  trend_summary: string
+}
+
+export interface OperatorInsightResponse {
+  status: 'success' | 'fallback' | 'data_required' | string
+  station: string
+  anchor_date?: string | null
+  forecast_horizon_hours: number
+  priority_level: number
+  priority_title: string
+  energy_status: 'NORMAL' | 'WATCH' | 'CONSERVE' | 'CRITICAL' | string
+  trend_analysis: EnergyTrendAnalysis
+  current_situation: string
+  forecast_impact: string
+  operational_consequence: string
+  recommended_actions: string[]
+  underlying_metrics: Record<string, any>
+  signal_availability: Record<string, string>
+  missing_data_notices: string[]
+  source: string
+}
+
+export function getOperatorInsight(
+  station?: string,
+  anchorDate?: string,
+  startDate?: string,
+  endDate?: string,
+  horizon: number = 24
+): Promise<OperatorInsightResponse> {
+  const params = new URLSearchParams()
+  if (station && station !== 'All' && station !== 'All Stations') params.append('station', station)
+  if (anchorDate) params.append('anchor_date', anchorDate)
+  if (startDate) params.append('start_date', startDate)
+  if (endDate) params.append('end_date', endDate)
+  if (horizon) params.append('horizon', String(horizon))
+  const qs = params.toString() ? `?${params.toString()}` : ''
+  return get<OperatorInsightResponse>(`/analytics/operator-insight${qs}`)
+}
+
+
 
 
 

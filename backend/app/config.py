@@ -25,7 +25,7 @@ _load_env()
 
 AI_API_KEY = os.environ.get("AI_API_KEY") or os.environ.get("GROQ_API_KEY", "")
 AI_API_ENDPOINT = os.environ.get("AI_API_ENDPOINT", "https://api.groq.com/openai/v1/chat/completions")
-AI_MODEL = os.environ.get("AI_MODEL", "llama-3.3-70b-versatile")
+AI_MODEL = os.environ.get("AI_MODEL", "qwen/qwen3.8-27b")
 
 # ---------------------------------------------------------------- station ---
 STATION_ID = "maitri-sim"

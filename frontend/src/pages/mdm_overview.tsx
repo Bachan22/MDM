@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef, useCallback } from 'react'
+import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react'
 import {
   getMdmStatus,
   getOverviewAnalytics,
@@ -15,6 +15,7 @@ import {
   AggregatedPoint,
 } from '../api'
 import { MdmFilterBar } from '../components/MdmFilterBar'
+import { MdmReportModal } from '../components/MdmReportModal'
 
 interface MdmOverviewPageProps {
   onNavigate: (page: string) => void
@@ -30,29 +31,116 @@ const FULL_MONTH_NAMES = [
   'July', 'August', 'September', 'October', 'November', 'December'
 ]
 
+function formatShortDate(dtStr: string): string {
+  if (!dtStr || dtStr.length < 10) return dtStr || ''
+  const parts = dtStr.slice(0, 10).split('-')
+  if (parts.length < 3) return dtStr
+  const mIdx = parseInt(parts[1], 10) - 1
+  const day = parseInt(parts[2], 10)
+  const month = MONTH_NAMES_SHORT[mIdx] || parts[1]
+  return `${month} ${day}`
+}
+
+/**
+ * Calculates the exact analytical start and end dates and human-readable period label
+ * based on selectedDate (anchor), periodMode, and optional custom range.
+ */
+function computePeriodWindow(
+  anchorStr: string,
+  mode: 'weekly' | 'monthly' | 'yearly' | 'daily',
+  customStart?: string,
+  customEnd?: string
+): { startDate: string; endDate: string; periodLabel: string } {
+  if (mode === 'daily') {
+    const s = customStart || anchorStr || '2025-08-01'
+    const e = customEnd || anchorStr || '2025-08-16'
+    const sLabel = formatShortDate(s)
+    const eLabel = formatShortDate(e)
+    return {
+      startDate: s,
+      endDate: e,
+      periodLabel: s === e ? sLabel : `${sLabel} – ${eLabel}`,
+    }
+  }
+
+  const parts = (anchorStr || '2025-08-15').slice(0, 10).split('-')
+  const y = parseInt(parts[0], 10) || 2025
+  const m = parseInt(parts[1], 10) || 8
+  const d = parseInt(parts[2], 10) || 15
+
+  if (mode === 'weekly') {
+    // Construct UTC date to avoid timezone shift
+    const dt = new Date(Date.UTC(y, m - 1, d))
+    const dayOfWeek = dt.getUTCDay() // 0 = Sun, 1 = Mon ... 6 = Sat
+    const diffToMon = (dayOfWeek + 6) % 7 // Mon = 0 ... Sun = 6
+
+    const mon = new Date(Date.UTC(y, m - 1, d - diffToMon))
+    const sun = new Date(Date.UTC(y, m - 1, d - diffToMon + 6))
+
+    const startStr = mon.toISOString().slice(0, 10)
+    const endStr = sun.toISOString().slice(0, 10)
+
+    const sMonth = FULL_MONTH_NAMES[mon.getUTCMonth()]
+    const eMonth = FULL_MONTH_NAMES[sun.getUTCMonth()]
+    const sDay = mon.getUTCDate()
+    const eDay = sun.getUTCDate()
+    const sYear = mon.getUTCFullYear()
+    const eYear = sun.getUTCFullYear()
+
+    let label = ''
+    if (sYear === eYear) {
+      if (sMonth === eMonth) {
+        label = `${sMonth.slice(0, 3)} ${sDay} – ${eDay}, ${sYear}`
+      } else {
+        label = `${sMonth.slice(0, 3)} ${sDay} – ${eMonth.slice(0, 3)} ${eDay}, ${sYear}`
+      }
+    } else {
+      label = `${sMonth.slice(0, 3)} ${sDay}, ${sYear} – ${eMonth.slice(0, 3)} ${eDay}, ${eYear}`
+    }
+    return { startDate: startStr, endDate: endStr, periodLabel: label }
+  }
+
+  if (mode === 'monthly') {
+    const daysInM = new Date(Date.UTC(y, m, 0)).getUTCDate()
+    const startStr = `${y}-${String(m).padStart(2, '0')}-01`
+    const endStr = `${y}-${String(m).padStart(2, '0')}-${String(daysInM).padStart(2, '0')}`
+    const label = `${FULL_MONTH_NAMES[m - 1]} ${y}`
+    return { startDate: startStr, endDate: endStr, periodLabel: label }
+  }
+
+  if (mode === 'yearly') {
+    const startStr = `${y}-01-01`
+    const endStr = `${y}-12-31`
+    return { startDate: startStr, endDate: endStr, periodLabel: `${y}` }
+  }
+
+  return { startDate: anchorStr, endDate: anchorStr, periodLabel: anchorStr }
+}
+
 export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) => {
+  // ─── Core Dataset Status & Sub-Analytics State ─────────────────────────────
   const [status, setStatus] = useState<MdmStatus | null>(null)
   const [overview, setOverview] = useState<OverviewAnalytics | null>(null)
   const [energyData, setEnergyData] = useState<EnergyAnalytics | null>(null)
   const [equipmentData, setEquipmentData] = useState<EquipmentHealthAnalytics | null>(null)
   const [resourceData, setResourceData] = useState<StationResourceRiskAnalytics | null>(null)
-  const [loading, setLoading] = useState<boolean>(true)
-  const [error, setError] = useState<string | null>(null)
-
-  const [selectedStation, setSelectedStation] = useState<string>('All')
-  const [startDate, setStartDate] = useState<string>('')
-  const [endDate, setEndDate] = useState<string>('')
-
-  // Period toggle for hero chart: 'weekly' | 'monthly' | 'yearly' | 'daily'
-  const [periodMode, setPeriodMode] = useState<'daily' | 'weekly' | 'monthly' | 'yearly'>('monthly')
-  const [anchorDate, setAnchorDate] = useState<string>('')
   const [periodData, setPeriodData] = useState<PeriodAggregationResponse | null>(null)
-  const [periodLoading, setPeriodLoading] = useState<boolean>(false)
 
-  // Convenience mode flags
-  const isYearly = periodMode === 'yearly'
-  const isMonthly = periodMode === 'monthly'
-  const isWeekly = periodMode === 'weekly'
+  const [loading, setLoading] = useState<boolean>(true)
+  const [periodLoading, setPeriodLoading] = useState<boolean>(false)
+  const [error, setError] = useState<string | null>(null)
+  const [showReportModal, setShowReportModal] = useState<boolean>(false)
+
+  // ─── Single Source of Truth for Filtering & Date Context ───────────────────
+  const [selectedStation, setSelectedStation] = useState<string>('All')
+  const [selectedPeriod, setSelectedPeriod] = useState<'daily' | 'weekly' | 'monthly' | 'yearly'>('monthly')
+  const [selectedDate, setSelectedDate] = useState<string>('')
+  const [customStartDate, setCustomStartDate] = useState<string>('')
+  const [customEndDate, setCustomEndDate] = useState<string>('')
+
+  // Calendar View State (Year and Month 1-12)
+  const [calendarYear, setCalendarYear] = useState<number>(2025)
+  const [calendarMonth, setCalendarMonth] = useState<number>(9) // 1 to 12
 
   // Chart interactivity & floating tooltip state
   const [activeBarIndex, setActiveBarIndex] = useState<number | null>(null)
@@ -60,99 +148,122 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
   const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
   const chartContainerRef = useRef<HTMLDivElement>(null)
 
-  // Range dropdown toggle state
+  // Range dropdown menu toggle
   const [showRangeMenu, setShowRangeMenu] = useState<boolean>(false)
-
-  // Calendar state (Year and Month 1-12)
-  const [calendarYear, setCalendarYear] = useState<number>(2025)
-  const [calendarMonth, setCalendarMonth] = useState<number>(9) // 1 to 12
 
   // AI Quick Question
   const [quickQuestion, setQuickQuestion] = useState<string>('')
 
-  // Initial status and overview load
-  const loadData = async () => {
+  // Sequence reference to discard out-of-order / stale asynchronous responses
+  const requestSeqRef = useRef<number>(0)
+
+  // Convenience mode flags
+  const isYearly = selectedPeriod === 'yearly'
+  const isMonthly = selectedPeriod === 'monthly'
+  const isWeekly = selectedPeriod === 'weekly'
+
+  // Compute active analytical window
+  const activeWindow = useMemo(() => {
+    return computePeriodWindow(selectedDate, selectedPeriod, customStartDate, customEndDate)
+  }, [selectedDate, selectedPeriod, customStartDate, customEndDate])
+
+  // ─── Initial Dataset Status Load ───────────────────────────────────────────
+  const initDatasetStatus = useCallback(async () => {
     try {
       setLoading(true)
       setError(null)
       const st = await getMdmStatus()
       setStatus(st)
-      if (st.has_data) {
-        const [ov, en, eq, rr] = await Promise.all([
-          getOverviewAnalytics(selectedStation, startDate, endDate),
-          getEnergyAnalytics(selectedStation, startDate, endDate).catch(() => null),
-          getEquipmentAnalytics(selectedStation, startDate, endDate).catch(() => null),
-          getResourceRiskAnalytics(selectedStation, startDate, endDate).catch(() => null),
-        ])
-        setOverview(ov)
-        setEnergyData(en)
-        setEquipmentData(eq)
-        setResourceData(rr)
 
-        // Set initial anchorDate from status range end if not set yet
-        if (!anchorDate && st.date_range_end) {
-          const dtStr = st.date_range_end.slice(0, 10)
-          setAnchorDate(dtStr)
-          const parsedYear = parseInt(dtStr.slice(0, 4), 10)
-          const parsedMonth = parseInt(dtStr.slice(5, 7), 10)
-          if (!isNaN(parsedYear)) setCalendarYear(parsedYear)
-          if (!isNaN(parsedMonth)) setCalendarMonth(parsedMonth)
-        }
-      } else {
-        setOverview(null)
-        setEnergyData(null)
-        setEquipmentData(null)
-        setResourceData(null)
+      if (st.has_data && st.date_range_end) {
+        const dtStr = st.date_range_end.slice(0, 10)
+        setSelectedDate((prev) => prev || dtStr)
+
+        const pYear = parseInt(dtStr.slice(0, 4), 10)
+        const pMonth = parseInt(dtStr.slice(5, 7), 10)
+        if (!isNaN(pYear)) setCalendarYear(pYear)
+        if (!isNaN(pMonth)) setCalendarMonth(pMonth)
       }
     } catch (err: any) {
-      setError(err.message || 'Failed to load overview data')
+      console.error('Failed to load dataset status:', err)
+      setError(err.message || 'Failed to initialize dataset telemetry')
     } finally {
       setLoading(false)
     }
-  }
+  }, [])
 
   useEffect(() => {
-    loadData()
-  }, [selectedStation, startDate, endDate])
+    initDatasetStatus()
+  }, [initDatasetStatus])
 
-  // Fetch deterministic period aggregation data whenever periodMode, anchorDate, station, or custom range changes
+  // ─── Main Recalculation Effect on Any Date/Period/Station Change ───────────
   useEffect(() => {
-    let isMounted = true
-    const fetchAggregation = async () => {
-      if (!status || !status.has_data) return
+    if (!status || !status.has_data) return
+
+    requestSeqRef.current += 1
+    const seq = requestSeqRef.current
+    setPeriodLoading(true)
+
+    const fetchAllDashboardData = async () => {
       try {
-        setPeriodLoading(true)
-        const agg = await getMdmAggregation(
-          selectedStation,
-          periodMode,
-          anchorDate,
-          periodMode === 'daily' ? startDate : undefined,
-          periodMode === 'daily' ? endDate : undefined
-        )
-        if (isMounted) {
-          setPeriodData(agg)
+        const { startDate: winStart, endDate: winEnd } = activeWindow
+
+        // Concurrently run period aggregation and sub-analytics filtered by this window
+        const [agg, ov, en, eq, rr] = await Promise.all([
+          getMdmAggregation(
+            selectedStation,
+            selectedPeriod,
+            selectedDate,
+            selectedPeriod === 'daily' ? winStart : undefined,
+            selectedPeriod === 'daily' ? winEnd : undefined
+          ),
+          getOverviewAnalytics(selectedStation, winStart, winEnd).catch(() => null),
+          getEnergyAnalytics(selectedStation, winStart, winEnd).catch(() => null),
+          getEquipmentAnalytics(selectedStation, winStart, winEnd).catch(() => null),
+          getResourceRiskAnalytics(selectedStation, winStart, winEnd).catch(() => null),
+        ])
+
+        // Discard stale responses if user clicked another date in the meantime
+        if (seq !== requestSeqRef.current) {
+          return
         }
+
+        setPeriodData(agg)
+        if (ov) setOverview(ov)
+        if (en) setEnergyData(en)
+        if (eq) setEquipmentData(eq)
+        if (rr) setResourceData(rr)
+        setError(null)
       } catch (err: any) {
-        console.error('Aggregation query failed:', err)
+        if (seq === requestSeqRef.current) {
+          console.error('Failed to update dashboard for selected date:', err)
+          setError(err.message || 'Failed to update analysis for selected date')
+        }
       } finally {
-        if (isMounted) setPeriodLoading(false)
+        if (seq === requestSeqRef.current) {
+          setPeriodLoading(false)
+        }
       }
     }
-    fetchAggregation()
-    return () => {
-      isMounted = false
-    }
-  }, [status, selectedStation, periodMode, anchorDate, startDate, endDate])
 
-  // Calendar Navigation
-  // In yearly mode: navigation moves year by year.
-  // In all other modes: navigation moves month by month.
+    fetchAllDashboardData()
+  }, [status, selectedStation, selectedPeriod, selectedDate, customStartDate, customEndDate, activeWindow])
+
+  // ─── Calendar Interaction Handlers ────────────────────────────────────────
+  const handleSelectDay = (day: number) => {
+    const formatted = `${calendarYear}-${String(calendarMonth).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+    setSelectedDate(formatted)
+  }
+
   const handlePrevMonth = () => {
-    if (periodMode === 'yearly') {
+    if (selectedPeriod === 'yearly') {
       const newYear = calendarYear - 1
       setCalendarYear(newYear)
-      const newAnchor = `${newYear}-${String(calendarMonth).padStart(2, '0')}-01`
-      setAnchorDate(newAnchor)
+      const currentDay = selectedDate ? parseInt(selectedDate.slice(8, 10), 10) || 1 : 1
+      const maxDaysInNewMonth = new Date(Date.UTC(newYear, calendarMonth, 0)).getUTCDate()
+      const clampedDay = Math.min(currentDay, maxDaysInNewMonth)
+      const newDate = `${newYear}-${String(calendarMonth).padStart(2, '0')}-${String(clampedDay).padStart(2, '0')}`
+      setSelectedDate(newDate)
     } else {
       let newMonth = calendarMonth - 1
       let newYear = calendarYear
@@ -162,17 +273,23 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
       }
       setCalendarYear(newYear)
       setCalendarMonth(newMonth)
-      const newAnchor = `${newYear}-${String(newMonth).padStart(2, '0')}-01`
-      setAnchorDate(newAnchor)
+      const currentDay = selectedDate ? parseInt(selectedDate.slice(8, 10), 10) || 1 : 1
+      const maxDaysInNewMonth = new Date(Date.UTC(newYear, newMonth, 0)).getUTCDate()
+      const clampedDay = Math.min(currentDay, maxDaysInNewMonth)
+      const newDate = `${newYear}-${String(newMonth).padStart(2, '0')}-${String(clampedDay).padStart(2, '0')}`
+      setSelectedDate(newDate)
     }
   }
 
   const handleNextMonth = () => {
-    if (periodMode === 'yearly') {
+    if (selectedPeriod === 'yearly') {
       const newYear = calendarYear + 1
       setCalendarYear(newYear)
-      const newAnchor = `${newYear}-${String(calendarMonth).padStart(2, '0')}-01`
-      setAnchorDate(newAnchor)
+      const currentDay = selectedDate ? parseInt(selectedDate.slice(8, 10), 10) || 1 : 1
+      const maxDaysInNewMonth = new Date(Date.UTC(newYear, calendarMonth, 0)).getUTCDate()
+      const clampedDay = Math.min(currentDay, maxDaysInNewMonth)
+      const newDate = `${newYear}-${String(calendarMonth).padStart(2, '0')}-${String(clampedDay).padStart(2, '0')}`
+      setSelectedDate(newDate)
     } else {
       let newMonth = calendarMonth + 1
       let newYear = calendarYear
@@ -182,54 +299,71 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
       }
       setCalendarYear(newYear)
       setCalendarMonth(newMonth)
-      const newAnchor = `${newYear}-${String(newMonth).padStart(2, '0')}-01`
-      setAnchorDate(newAnchor)
+      const currentDay = selectedDate ? parseInt(selectedDate.slice(8, 10), 10) || 1 : 1
+      const maxDaysInNewMonth = new Date(Date.UTC(newYear, newMonth, 0)).getUTCDate()
+      const clampedDay = Math.min(currentDay, maxDaysInNewMonth)
+      const newDate = `${newYear}-${String(newMonth).padStart(2, '0')}-${String(clampedDay).padStart(2, '0')}`
+      setSelectedDate(newDate)
     }
   }
 
-  const handleSelectDay = (day: number) => {
-    const formatted = `${calendarYear}-${String(calendarMonth).padStart(2, '0')}-${String(day).padStart(2, '0')}`
-    setAnchorDate(formatted)
+  // Yearly month grid click
+  const handleSelectYearlyMonth = (mNum: number) => {
+    setCalendarMonth(mNum)
+    const currentDay = selectedDate ? parseInt(selectedDate.slice(8, 10), 10) || 1 : 1
+    const maxDays = new Date(Date.UTC(calendarYear, mNum, 0)).getUTCDate()
+    const clampedDay = Math.min(currentDay, maxDays)
+    const formatted = `${calendarYear}-${String(mNum).padStart(2, '0')}-${String(clampedDay).padStart(2, '0')}`
+    setSelectedDate(formatted)
+    setSelectedPeriod('monthly')
   }
 
-  // Yearly bar click — drill down to Monthly mode.
-  // bar.key format is "YYYY-MM" for yearly aggregation points.
-  const handleYearlyMonthClick = (bar: AggregatedPoint) => {
-    if (!bar.key || bar.key.length < 7) return
-    const yearFromKey = parseInt(bar.key.slice(0, 4), 10)
-    const monthFromKey = parseInt(bar.key.slice(5, 7), 10)
-    if (isNaN(yearFromKey) || isNaN(monthFromKey)) return
-    setCalendarYear(yearFromKey)
-    setCalendarMonth(monthFromKey)
-    const formatted = `${yearFromKey}-${String(monthFromKey).padStart(2, '0')}-01`
-    setAnchorDate(formatted)
-    setPeriodMode('monthly')
+  // Chart Bar click
+  const handleBarClick = (bar: AggregatedPoint) => {
+    if (selectedPeriod === 'yearly') {
+      if (!bar.key || bar.key.length < 7) return
+      const yFromKey = parseInt(bar.key.slice(0, 4), 10)
+      const mFromKey = parseInt(bar.key.slice(5, 7), 10)
+      if (isNaN(yFromKey) || isNaN(mFromKey)) return
+      setCalendarYear(yFromKey)
+      setCalendarMonth(mFromKey)
+      const currentDay = selectedDate ? parseInt(selectedDate.slice(8, 10), 10) || 1 : 1
+      const maxDays = new Date(Date.UTC(yFromKey, mFromKey, 0)).getUTCDate()
+      const clampedDay = Math.min(currentDay, maxDays)
+      setSelectedDate(`${yFromKey}-${String(mFromKey).padStart(2, '0')}-${String(clampedDay).padStart(2, '0')}`)
+      setSelectedPeriod('monthly')
+    } else if (bar.key && bar.key.length === 10) {
+      setSelectedDate(bar.key)
+      const pYear = parseInt(bar.key.slice(0, 4), 10)
+      const pMonth = parseInt(bar.key.slice(5, 7), 10)
+      if (!isNaN(pYear)) setCalendarYear(pYear)
+      if (!isNaN(pMonth)) setCalendarMonth(pMonth)
+    }
   }
 
   // Handle Range presets
-  const handleRangeSelect = (preset: 'last7' | 'last30' | 'last90' | 'custom') => {
+  const handleRangeSelect = (preset: 'last7' | 'last30' | 'last90') => {
     setShowRangeMenu(false)
-    setPeriodMode('daily')
+    setSelectedPeriod('daily')
 
-    const baseDate = anchorDate ? new Date(anchorDate) : new Date()
-    if (preset === 'last7') {
-      const start = new Date(baseDate)
-      start.setDate(start.getDate() - 6)
-      setStartDate(start.toISOString().slice(0, 10))
-      setEndDate(baseDate.toISOString().slice(0, 10))
-    } else if (preset === 'last30') {
-      const start = new Date(baseDate)
-      start.setDate(start.getDate() - 29)
-      setStartDate(start.toISOString().slice(0, 10))
-      setEndDate(baseDate.toISOString().slice(0, 10))
-    } else if (preset === 'last90') {
-      const start = new Date(baseDate)
-      start.setDate(start.getDate() - 89)
-      setStartDate(start.toISOString().slice(0, 10))
-      setEndDate(baseDate.toISOString().slice(0, 10))
+    const baseDate = selectedDate ? new Date(selectedDate) : new Date()
+    const days = preset === 'last7' ? 6 : preset === 'last30' ? 29 : 89
+    const start = new Date(baseDate)
+    start.setDate(start.getDate() - days)
+
+    setCustomStartDate(start.toISOString().slice(0, 10))
+    setCustomEndDate(baseDate.toISOString().slice(0, 10))
+  }
+
+  const handleAskQuickQuestion = (e: React.FormEvent) => {
+    e.preventDefault()
+    if (quickQuestion.trim()) {
+      localStorage.setItem('polar_quick_question', quickQuestion)
+      onNavigate('analyst')
     }
   }
 
+  // ─── Guard: Initial Loading State ──────────────────────────────────────────
   if (loading && !overview && !status) {
     return (
       <div className="card" style={{ padding: 48, textAlign: 'center', margin: '20px 0' }}>
@@ -239,7 +373,7 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
     )
   }
 
-  // EMPTY STATE — Strict NO FAKE DATA requirement
+  // ─── Guard: Empty Dataset State (Strict NO Fake Data) ───────────────────────
   if (!status || !status.has_data) {
     return (
       <div>
@@ -280,6 +414,7 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
     )
   }
 
+  // ─── Computed Values for the Active Period Window ──────────────────────────
   const es = overview?.energy_summary
   const eq = overview?.equipment_summary
   const rr = overview?.resource_risk_summary
@@ -287,7 +422,7 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
 
   // Dynamic Chart Bars from deterministic Period Aggregation API
   const chartBars: AggregatedPoint[] = periodData?.points || []
-  const maxChartVal = Math.max(...chartBars.map((b) => b.value), 10) * 1.25
+  const maxChartVal = Math.max(...chartBars.map((b) => b.value || 0), 10) * 1.25
 
   // Station Distribution Donut Chart Segments
   const stationComparison = resourceData?.station_risk_comparison || []
@@ -306,12 +441,12 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
       const pctEach = Math.round(100 / status.stations.length)
       return status.stations.map((stName, idx) => ({
         name: stName,
-        value: Math.round((es?.avg_power_kw || 100) / status.stations.length),
+        value: Math.round((periodData?.current_total || es?.total_energy || 100) / status.stations.length),
         pct: pctEach,
         color: donutColors[idx % donutColors.length],
       }))
     }
-    return [{ name: 'Primary Station', value: es?.total_energy || 100, pct: 100, color: '#38bdf8' }]
+    return [{ name: selectedStation !== 'All' ? selectedStation : 'Primary Station', value: periodData?.current_total || es?.total_energy || 100, pct: 100, color: '#38bdf8' }]
   })()
 
   // Recent Equipment & Telemetry Signals List
@@ -324,7 +459,7 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
         status: r.risk_level === 'HIGH' ? 'Critical' : r.risk_level === 'MODERATE' ? 'Pending' : 'Nominal',
         statusColor: r.risk_level === 'HIGH' ? 'red' : r.risk_level === 'MODERATE' ? 'amber' : 'green',
         dueText: r.last_observed ? r.last_observed.slice(5, 16) : 'Telemetry active',
-        metric: r.current_load_kw ? `${r.current_load_kw} kW` : `${100 - (r.anomaly_count * 10)}% Health`,
+        metric: r.current_load_kw ? `${r.current_load_kw.toFixed(1)} kW` : `${Math.max(20, 100 - (r.anomaly_count * 10))}% Health`,
       }))
     }
     if (anomalyTimeline.length > 0) {
@@ -346,25 +481,17 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
   // Calculate Health Score
   const healthScore = Math.max(40, Math.min(100, 100 - ((eq?.anomalies_detected || 0) * 4)))
 
-  const handleAskQuickQuestion = (e: React.FormEvent) => {
-    e.preventDefault()
-    if (quickQuestion.trim()) {
-      localStorage.setItem('polar_quick_question', quickQuestion)
-      onNavigate('analyst')
-    }
-  }
-
-  // Calendar calculation for current calendarYear and calendarMonth
+  // Calendar calculations for current calendarYear and calendarMonth
   const daysInMonth = new Date(calendarYear, calendarMonth, 0).getDate()
   // Monday is 0, Sunday is 6
   const firstDayOfWeek = (new Date(calendarYear, calendarMonth - 1, 1).getDay() + 6) % 7
   const availableDatesSet = new Set(periodData?.available_calendar_dates || [])
 
-  const currentAnchorDay = anchorDate.startsWith(`${calendarYear}-${String(calendarMonth).padStart(2, '0')}`)
-    ? parseInt(anchorDate.slice(8, 10), 10)
-    : null
+  // Check if selectedDate matches the displayed calendar month
+  const isSelectedDateInCalendar = selectedDate.startsWith(`${calendarYear}-${String(calendarMonth).padStart(2, '0')}`)
+  const selectedDayNum = isSelectedDateInCalendar ? parseInt(selectedDate.slice(8, 10), 10) : null
 
-  // ─── Metric totals, KPIs and trend labels ────────────────────────────────
+  // ─── Metric totals, KPIs and trend labels ──────────────────────────────────
   const displayTotalEnergy = periodData ? periodData.current_total : (es?.total_energy || 0)
   const displayTrendPct = periodData?.trend_pct != null ? Math.abs(periodData.trend_pct) : null
   const displayTrendDir = periodData?.trend_direction || (es?.trend_direction || 'Stable')
@@ -375,28 +502,29 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
   const peakPointLabel = periodData?.peak_label ?? null
   const lowestValue = periodData?.lowest_value ?? null
   const lowestPointLabel = periodData?.lowest_label ?? null
-  const recordCount = periodData?.record_count ?? 0
+  const recordCount = periodData?.record_count ?? (es?.total_energy ? 1 : 0)
 
   // Period-adaptive labels
   const avgConsumptionLabel = isYearly ? 'Avg / Month' : 'Avg / Day'
   const peakLabel = isYearly ? 'Peak Month' : 'Peak Day'
   const lowestLabel = isYearly ? 'Lowest Month' : 'Lowest Day'
 
-  // Trend comparison label — strictly sourced from actual data
+  // Trend comparison label
   const trendCompareLabel = isYearly
     ? `vs ${calendarYear - 1}`
     : isMonthly
     ? `vs ${MONTH_NAMES_SHORT[(calendarMonth - 2 + 12) % 12]}`
     : 'vs last period'
 
-  // Calendar header: yearly mode shows just the year
+  // Header active period label
+  const displayPeriodLabel = periodData?.period_label || activeWindow.periodLabel
+
+  // Calendar header
   const calendarHeaderLabel = isYearly
     ? `${calendarYear}`
     : `${FULL_MONTH_NAMES[calendarMonth - 1]}, ${calendarYear}`
 
-  // Dynamic chart values
-  const chartBarsAll: AggregatedPoint[] = chartBars
-  // Y-axis ticks — dynamically scaled to actual max
+  // Y-axis ticks scaled to actual max
   const yAxisTicks = (() => {
     const step = maxChartVal / 4
     return [0, 1, 2, 3, 4].map((i) => Math.round(i * step))
@@ -421,12 +549,114 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
         status={status}
         selectedStation={selectedStation}
         onStationChange={setSelectedStation}
-        startDate={startDate}
-        onStartDateChange={setStartDate}
-        endDate={endDate}
-        onEndDateChange={setEndDate}
-        onRefresh={loadData}
+        startDate={customStartDate}
+        onStartDateChange={(d) => {
+          setCustomStartDate(d)
+          if (d) setSelectedPeriod('daily')
+        }}
+        endDate={customEndDate}
+        onEndDateChange={(d) => {
+          setCustomEndDate(d)
+          if (d) setSelectedPeriod('daily')
+        }}
+        onRefresh={initDatasetStatus}
       />
+
+      {/* Data Coverage & Quality Indicator Card (Overall Dataset Statistics) */}
+      {status && status.has_data && (
+        <div
+          className="card"
+          style={{
+            padding: '14px 20px',
+            marginBottom: 18,
+            display: 'flex',
+            flexWrap: 'wrap',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 16,
+            background: 'var(--bg-card)',
+            border: '1px solid var(--border)',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <div
+              style={{
+                width: 38,
+                height: 38,
+                borderRadius: 10,
+                background: 'rgba(56, 189, 248, 0.1)',
+                border: '1px solid rgba(56, 189, 248, 0.2)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: 18,
+              }}
+            >
+              🛡️
+            </div>
+            <div>
+              <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.6 }}>
+                DATA COVERAGE &amp; QUALITY
+              </div>
+              <div style={{ fontSize: 13.5, fontWeight: 700, color: '#ffffff', marginTop: 2 }}>
+                {status.records_count.toLocaleString()} Records across {status.stations_count} Station(s)
+              </div>
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 20, fontSize: 12 }}>
+            <div>
+              <span style={{ color: 'var(--text-muted)' }}>Date Range: </span>
+              <strong style={{ color: '#ffffff' }}>
+                {status.date_range_start?.slice(0, 10) || 'N/A'} → {status.date_range_end?.slice(0, 10) || 'N/A'}
+              </strong>
+            </div>
+            <div>
+              <span style={{ color: 'var(--text-muted)' }}>Missing Values: </span>
+              <strong style={{ color: status.missing_values_pct && status.missing_values_pct > 5 ? 'var(--warn)' : 'var(--text-main)' }}>
+                {status.missing_values_pct ?? 0}%
+              </strong>
+            </div>
+            <div>
+              <span style={{ color: 'var(--text-muted)' }}>Valid Records: </span>
+              <strong style={{ color: '#ffffff' }}>
+                {(status.valid_records_count || status.records_count).toLocaleString()}
+              </strong>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ color: 'var(--text-muted)' }}>Data Quality: </span>
+              <span
+                className={`badge ${(status.data_quality_pct ?? 100) >= 95 ? 'safe' : (status.data_quality_pct ?? 100) >= 85 ? 'warn' : 'critical'}`}
+                style={{ fontSize: 11.5, padding: '3px 10px', fontWeight: 700 }}
+              >
+                {status.data_quality_pct ?? 100}%
+              </span>
+            </div>
+          </div>
+
+          <button
+            className="btn"
+            onClick={() => setShowReportModal(true)}
+            style={{
+              padding: '8px 18px',
+              fontSize: 12.5,
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 6,
+              background: 'var(--accent, #38bdf8)',
+              color: '#000000',
+              fontWeight: 700,
+              border: 'none',
+              borderRadius: 6,
+              cursor: 'pointer',
+              transition: 'all 0.15s ease',
+            }}
+          >
+            <span>📄</span>
+            <span>Export Report</span>
+          </button>
+        </div>
+      )}
 
       {error && (
         <div style={{ padding: '10px 14px', background: 'var(--bad-dim)', border: '1px solid var(--bad)', borderRadius: 8, marginBottom: 16, color: 'var(--bad)', fontSize: 13 }}>
@@ -439,7 +669,7 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
           ========================================================================== */}
       <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 2fr) minmax(0, 1fr)', gap: 18, marginBottom: 18 }}>
         
-        {/* Left Card: Hero Energy / Revenue Bar Chart */}
+        {/* Left Card: Hero Energy Bar Chart */}
         <div className="card" style={{ padding: '22px 26px', display: 'flex', flexDirection: 'column', position: 'relative' }}>
           {/* Card Header & Controls */}
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16, flexWrap: 'wrap', gap: 12 }}>
@@ -448,9 +678,9 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
                 <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-dim)', letterSpacing: 0.4 }}>
                   Energy Consumption
                 </span>
-                {periodData?.period_label && (
+                {displayPeriodLabel && (
                   <span style={{ fontSize: 11, color: 'var(--accent)', background: 'rgba(56, 189, 248, 0.1)', padding: '2px 8px', borderRadius: 10, fontWeight: 600 }}>
-                    {periodData.period_label}
+                    {displayPeriodLabel}
                   </span>
                 )}
                 {isYearly && (
@@ -461,6 +691,11 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
                 {isMonthly && (
                   <span style={{ fontSize: 10, color: 'var(--text-muted)', background: 'var(--bg-secondary)', padding: '2px 6px', borderRadius: 6, fontWeight: 500 }}>
                     Daily Aggregation
+                  </span>
+                )}
+                {isWeekly && (
+                  <span style={{ fontSize: 10, color: 'var(--text-muted)', background: 'var(--bg-secondary)', padding: '2px 6px', borderRadius: 6, fontWeight: 500 }}>
+                    7-Day Window
                   </span>
                 )}
               </div>
@@ -509,34 +744,34 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
             <div style={{ position: 'relative' }}>
               <div className="pill-group">
                 <button
-                  className={`pill-btn ${periodMode === 'weekly' ? 'active' : ''}`}
+                  className={`pill-btn ${selectedPeriod === 'weekly' ? 'active' : ''}`}
                   onClick={() => {
-                    setPeriodMode('weekly')
+                    setSelectedPeriod('weekly')
                     setShowRangeMenu(false)
                   }}
                 >
                   Weekly
                 </button>
                 <button
-                  className={`pill-btn ${periodMode === 'monthly' ? 'active' : ''}`}
+                  className={`pill-btn ${selectedPeriod === 'monthly' ? 'active' : ''}`}
                   onClick={() => {
-                    setPeriodMode('monthly')
+                    setSelectedPeriod('monthly')
                     setShowRangeMenu(false)
                   }}
                 >
                   Monthly
                 </button>
                 <button
-                  className={`pill-btn ${periodMode === 'yearly' ? 'active' : ''}`}
+                  className={`pill-btn ${selectedPeriod === 'yearly' ? 'active' : ''}`}
                   onClick={() => {
-                    setPeriodMode('yearly')
+                    setSelectedPeriod('yearly')
                     setShowRangeMenu(false)
                   }}
                 >
                   Yearly
                 </button>
                 <button
-                  className={`pill-btn ${periodMode === 'daily' ? 'active' : ''}`}
+                  className={`pill-btn ${selectedPeriod === 'daily' ? 'active' : ''}`}
                   onClick={() => setShowRangeMenu((prev) => !prev)}
                 >
                   Range ▾
@@ -551,7 +786,7 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
                     top: '100%',
                     right: 0,
                     marginTop: 6,
-                    background: 'var(--bg-popover)',
+                    background: 'var(--bg-popover, #111827)',
                     border: '1px solid var(--border)',
                     borderRadius: 10,
                     padding: '6px 0',
@@ -592,17 +827,30 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
           {/* SVG Hero Bar Chart */}
           <div ref={chartContainerRef} style={{ flex: 1, minHeight: 220, position: 'relative', marginTop: 10 }}>
             {periodLoading && (
-              <div style={{ position: 'absolute', top: 10, right: 10, fontSize: 11, color: 'var(--accent)', zIndex: 10 }}>
-                Refreshing telemetry...
+              <div
+                style={{
+                  position: 'absolute',
+                  top: 8,
+                  right: 8,
+                  fontSize: 11,
+                  color: 'var(--accent)',
+                  background: 'rgba(15, 23, 42, 0.85)',
+                  padding: '3px 8px',
+                  borderRadius: 6,
+                  border: '1px solid rgba(56, 189, 248, 0.3)',
+                  zIndex: 10,
+                }}
+              >
+                ↻ Updating analysis...
               </div>
             )}
 
-            {chartBarsAll.length === 0 ? (
+            {chartBars.length === 0 ? (
               <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: 200, color: 'var(--text-dim)' }}>
                 <span style={{ fontSize: 24, marginBottom: 8 }}>📉</span>
                 <span style={{ fontSize: 13, fontWeight: 600 }}>No telemetry available for this period</span>
                 <span style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 4 }}>
-                  Select another date, station, or upload historical records.
+                  Select another date, station, or upload additional historical records.
                 </span>
               </div>
             ) : (
@@ -616,7 +864,7 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
                   setHoveredPoint(null)
                 }}
               >
-                {/* Y-Axis Grid Lines & Ticks — dynamically scaled */}
+                {/* Y-Axis Grid Lines & Ticks */}
                 {yAxisTicks.map((tick, i) => {
                   const y = 180 - (i * 38)
                   return (
@@ -630,9 +878,8 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
                 })}
 
                 {/* Bars */}
-                {chartBarsAll.map((bar, idx) => {
-                  const count = chartBarsAll.length
-                  // Responsive bar widths & spacing
+                {chartBars.map((bar, idx) => {
+                  const count = chartBars.length
                   const barWidth = count <= 7 ? 56 : count <= 12 ? 38 : count <= 31 ? 14 : Math.max(6, Math.floor(580 / count) - 2)
                   const totalBarsWidth = count * barWidth
                   const gap = Math.max(2, (620 - totalBarsWidth) / (count + 1))
@@ -641,11 +888,7 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
                   const y = 180 - barHeight
                   const isSelected = activeBarIndex === idx || (activeBarIndex === null && bar.is_peak)
 
-                  // Label filtering:
-                  // - Yearly: always show all 12 month labels
-                  // - Monthly (28-31 bars): show 1st, every 5th day, last day
-                  // - Weekly (7 bars): show all
-                  // - Range/large: show strategically
+                  // Strategic label visibility
                   let showLabel = true
                   if (isYearly) {
                     showLabel = true
@@ -670,14 +913,8 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
                           setTooltipPos({ x: relX, y: relY })
                         }
                       }}
-                      onClick={() => {
-                        if (periodMode === 'yearly') {
-                          handleYearlyMonthClick(bar)
-                        } else if (bar.key && bar.key.length === 10) {
-                          setAnchorDate(bar.key)
-                        }
-                      }}
-                      style={{ cursor: periodMode === 'yearly' || periodMode === 'monthly' ? 'pointer' : 'default' }}
+                      onClick={() => handleBarClick(bar)}
+                      style={{ cursor: 'pointer' }}
                     >
                       {/* Bar Background Capsule */}
                       <rect
@@ -722,12 +959,12 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
                         />
                       )}
 
-                      {/* Peak star marker */}
+                      {/* Peak marker */}
                       {bar.is_peak && bar.has_data && !isSelected && (
                         <text x={x + barWidth / 2} y={y - 4} fill="#38bdf8" fontSize="9" textAnchor="middle">★</text>
                       )}
 
-                      {/* No-data dash indicator */}
+                      {/* No-data indicator */}
                       {!bar.has_data && (
                         <text x={x + barWidth / 2} y={178} fill="rgba(255,255,255,0.18)" fontSize="7" textAnchor="middle">–</text>
                       )}
@@ -821,7 +1058,7 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
                   )}
                   {isMonthly && hoveredPoint.has_data && (
                     <div style={{ fontSize: 9, color: 'var(--text-muted)', marginTop: 5, fontStyle: 'italic' }}>
-                      ↙ Click to set anchor date
+                      ↙ Click to set active date
                     </div>
                   )}
                 </div>
@@ -830,7 +1067,7 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
           </div>
 
           {/* KPI Strip below chart */}
-          {periodData && periodData.has_data && (
+          {periodData && (
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, marginTop: 14, paddingTop: 14, borderTop: '1px solid var(--border-subtle)' }}>
               {/* Annual/Monthly/Period Total */}
               <div style={{ flex: '1 1 120px', minWidth: 100 }}>
@@ -899,7 +1136,7 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
           )}
         </div>
 
-        {/* Right Card: Interactive Calendar Widget */}
+        {/* Right Card: Interactive Calendar Widget (Primary Analytical Controller) */}
         <div className="card calendar-card" style={{ display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
           <div>
             {/* Calendar Header with Navigation */}
@@ -929,18 +1166,13 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
                 {MONTH_NAMES_SHORT.map((mName, mIdx) => {
                   const mNum = mIdx + 1
                   const ymKey = `${calendarYear}-${String(mNum).padStart(2, '0')}`
-                  const hasData = chartBarsAll.some((b) => b.key === ymKey && b.has_data)
-                  const isPeak = chartBarsAll.some((b) => b.key === ymKey && b.is_peak)
+                  const hasData = chartBars.some((b) => b.key === ymKey && b.has_data)
+                  const isPeak = chartBars.some((b) => b.key === ymKey && b.is_peak)
                   const isCurrentCalMonth = calendarMonth === mNum
                   return (
                     <div
                       key={mIdx}
-                      onClick={() => {
-                        setCalendarMonth(mNum)
-                        const formatted = `${calendarYear}-${String(mNum).padStart(2, '0')}-01`
-                        setAnchorDate(formatted)
-                        setPeriodMode('monthly')
-                      }}
+                      onClick={() => handleSelectYearlyMonth(mNum)}
                       style={{
                         padding: '10px 4px',
                         textAlign: 'center',
@@ -991,8 +1223,12 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
 
                   {Array.from({ length: daysInMonth }, (_, i) => i + 1).map((day) => {
                     const dayStr = `${calendarYear}-${String(calendarMonth).padStart(2, '0')}-${String(day).padStart(2, '0')}`
-                    const isActive = currentAnchorDay === day
+                    const isActive = selectedDayNum === day
                     const hasTelemetry = availableDatesSet.has(dayStr)
+
+                    // In weekly mode, highlight days in the active week window
+                    const isInActiveWeek = isWeekly && dayStr >= activeWindow.startDate && dayStr <= activeWindow.endDate
+
                     return (
                       <div
                         key={day}
@@ -1000,9 +1236,22 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
                         onClick={() => handleSelectDay(day)}
                         style={{
                           position: 'relative',
-                          border: hasTelemetry && !isActive ? '1px solid rgba(56, 189, 248, 0.25)' : undefined,
+                          border: isActive
+                            ? '1px solid #38bdf8'
+                            : isInActiveWeek
+                            ? '1px solid rgba(56, 189, 248, 0.4)'
+                            : hasTelemetry
+                            ? '1px solid rgba(56, 189, 248, 0.25)'
+                            : undefined,
+                          background: isActive
+                            ? '#38bdf8'
+                            : isInActiveWeek
+                            ? 'rgba(56, 189, 248, 0.12)'
+                            : undefined,
+                          color: isActive ? '#000000' : undefined,
+                          fontWeight: isActive ? 800 : isInActiveWeek ? 700 : undefined,
                         }}
-                        title={hasTelemetry ? `${dayStr}: Telemetry recorded.` : `${dayStr}: No telemetry.`}
+                        title={hasTelemetry ? `${dayStr}: Telemetry active. Click to analyze.` : `${dayStr}: Click to set date.`}
                       >
                         {day}
                         {hasTelemetry && !isActive && (
@@ -1057,7 +1306,7 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
       </div>
 
       {/* ==========================================================================
-          BOTTOM TIER: 3 Cards (AI Assistant + Spending/Distribution + Health/Invoices)
+          BOTTOM TIER: 3 Cards (AI Assistant + Distribution + Equipment Signals)
           ========================================================================== */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 18, marginBottom: 18 }}>
         
@@ -1081,13 +1330,34 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
               </span>
             </div>
 
+            {/* Dynamic AI Insights Warning Banner if fallback */}
+            {overview?.dynamic_ai_insights?.status === 'fallback' && (
+              <div
+                style={{
+                  padding: '6px 10px',
+                  background: 'rgba(245, 158, 11, 0.12)',
+                  border: '1px solid rgba(245, 158, 11, 0.3)',
+                  borderRadius: 6,
+                  fontSize: 11,
+                  color: 'var(--warn)',
+                  marginBottom: 10,
+                }}
+              >
+                ⚠ AI Insights generated from empirical telemetry for active period.
+              </div>
+            )}
+
             {/* AI Summary Text */}
             <div style={{ marginBottom: 16 }}>
               <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: 4 }}>
-                AI Summary
+                Dynamic AI Insights ({displayPeriodLabel})
               </div>
               <p style={{ fontSize: 12.5, color: 'var(--text-dim)', lineHeight: 1.55, margin: 0 }}>
-                {insights[0]?.finding || 'Station telemetry activity this period remains stable. Power consumption shows expected variation across active scientific loads. No critical thermal or battery risks detected.'}
+                {overview?.dynamic_ai_insights?.summary ||
+                  insights[0]?.finding ||
+                  (periodData?.has_data
+                    ? `Station telemetry activity for ${displayPeriodLabel} shows total consumption of ${displayTotalEnergy.toLocaleString(undefined, { maximumFractionDigits: 1 })} kWh with peak demand of ${peakValue != null ? peakValue.toLocaleString() : 'N/A'} kWh.`
+                    : 'No telemetry recorded for this specific period window. Select another date or period to inspect historical records.')}
                 <span
                   onClick={() => onNavigate('analyst')}
                   style={{ color: 'var(--accent)', cursor: 'pointer', marginLeft: 4, fontWeight: 600 }}
@@ -1103,7 +1373,7 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
                 <div style={{ fontSize: 10.5, color: 'var(--text-muted)', fontWeight: 600 }}>Energy Trend</div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4 }}>
                   <span style={{ fontSize: 16, fontWeight: 700, fontFamily: 'var(--mono)', color: '#ffffff' }}>
-                    {displayTrendPct != null ? displayTrendPct : '7'}
+                    {displayTrendPct != null ? `${displayTrendPct}%` : '0%'}
                   </span>
                   <span className={`badge ${displayTrendDir === 'Increasing' ? 'warn' : 'safe'}`} style={{ fontSize: 9.5, padding: '2px 6px' }}>
                     {displayTrendDir}
@@ -1171,7 +1441,7 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
                 Station Distribution
               </h3>
               <div className="pill-group" style={{ padding: '2px 8px', fontSize: 11 }}>
-                <span>{periodData?.period_label || 'Active Period'}</span>
+                <span>{displayPeriodLabel}</span>
               </div>
             </div>
 
@@ -1225,7 +1495,7 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
                     {displayTotalEnergy ? `${Math.round(displayTotalEnergy).toLocaleString()}` : '0'}
                   </span>
                   <span style={{ fontSize: 10, color: 'var(--text-muted)', textTransform: 'uppercase' }}>
-                    Total
+                    {isYearly ? 'Annual' : isMonthly ? 'Monthly' : 'Period'}
                   </span>
                 </div>
               </div>
@@ -1264,7 +1534,7 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
           >
             <span style={{ color: 'var(--accent)', fontSize: 12 }}>ℹ</span>
             <span>
-              Primary consumption concentrated in {status.stations[0] || 'Main Station'}, with {status.stations_count} active reporting site{status.stations_count > 1 ? 's' : ''}.
+              Primary consumption in {status.stations[0] || 'Main Station'} for {displayPeriodLabel}.
             </span>
           </div>
         </div>
@@ -1301,7 +1571,7 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
             {/* Health Score Segmented Meter Bar */}
             <div style={{ marginBottom: 14 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6, fontSize: 11 }}>
-                <span style={{ color: 'var(--text-muted)', fontWeight: 600 }}>Fleet Health Score</span>
+                <span style={{ color: 'var(--text-muted)', fontWeight: 600 }}>Fleet Health Score ({displayPeriodLabel})</span>
                 <span style={{ fontFamily: 'var(--mono)', fontWeight: 700, color: '#ffffff' }}>{healthScore}</span>
               </div>
               <div className="segmented-meter">
@@ -1382,7 +1652,7 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
       </div>
 
       {/* ==========================================================================
-          CROSS-SYSTEM RISK OVERVIEW STRIP
+          CROSS-SYSTEM RISK OVERVIEW STRIP (Period-Adaptive)
           ========================================================================== */}
       <div
         className="card"
@@ -1398,7 +1668,7 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <span style={{ fontSize: 11.5, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.6 }}>
-            SYSTEM RISK:
+            SYSTEM RISK ({displayPeriodLabel}):
           </span>
         </div>
 
@@ -1409,8 +1679,8 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
             style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', padding: '4px 10px', borderRadius: 6, background: 'var(--bg-secondary)', border: '1px solid var(--border)' }}
           >
             <span style={{ fontSize: 11.5, color: 'var(--text-dim)' }}>Energy Risk:</span>
-            <span className={`badge ${es?.trend_direction === 'Increasing' ? 'warn' : 'safe'}`} style={{ fontSize: 10 }}>
-              {es?.trend_direction === 'Increasing' ? 'MODERATE' : 'LOW'}
+            <span className={`badge ${displayTrendDir === 'Increasing' ? 'warn' : 'safe'}`} style={{ fontSize: 10 }}>
+              {displayTrendDir === 'Increasing' ? 'MODERATE' : 'LOW'}
             </span>
           </div>
 
@@ -1463,6 +1733,18 @@ export const MdmOverviewPage: React.FC<MdmOverviewPageProps> = ({ onNavigate }) 
           </div>
         </div>
       </div>
+
+      {/* Export Analysis Report Modal */}
+      <MdmReportModal
+        isOpen={showReportModal}
+        onClose={() => setShowReportModal(false)}
+        status={status}
+        overview={overview}
+        selectedStation={selectedStation}
+        periodMode={selectedPeriod}
+        startDate={activeWindow.startDate}
+        endDate={activeWindow.endDate}
+      />
     </div>
   )
 }

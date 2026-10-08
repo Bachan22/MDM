@@ -412,6 +412,7 @@ def clean_dataset_bytes(
         combined_stats["end_date"] = all_sheet_records[-1]["timestamp"]
         combined_stats["stations"] = sorted(list(combined_stats["stations"]))
 
+        combined_stats["selected_sheet"] = combined_stats["processed_sheets"][0] if combined_stats["processed_sheets"] else None
         return {
             "success": True,
             "records": all_sheet_records,

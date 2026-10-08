@@ -4,14 +4,17 @@ import { getMdmStatus, MdmStatus } from './api'
 // MDM Page components
 import { MdmOverviewPage } from './pages/mdm_overview'
 import { MdmEnergyPage } from './pages/mdm_energy'
+import { MdmForecastPage } from './pages/mdm_forecast'
 import { MdmEquipmentPage } from './pages/mdm_equipment'
 import { MdmResourceRiskPage } from './pages/mdm_resource_risk'
 import { MdmAnalystPage } from './pages/mdm_analyst'
 import { MdmUploadPage } from './pages/mdm_upload'
+import { ErrorBoundary } from './components/ErrorBoundary'
 
 const NAV_ITEMS = [
   { id: 'overview', label: 'Overview', icon: '⌂', symbol: 'Overview' },
   { id: 'energy', label: 'Energy Analysis', icon: '⚡', symbol: 'Energy' },
+  { id: 'forecast', label: 'Weather Load Forecast', icon: '📈', symbol: 'Forecast' },
   { id: 'equipment', label: 'Equipment Health', icon: '⚙', symbol: 'Equipment' },
   { id: 'resource_risk', label: 'Resource Risk', icon: '🛡', symbol: 'Resource Risk' },
   { id: 'analyst', label: 'AI Analyst', icon: '✨', symbol: 'AI Analyst' },
@@ -49,6 +52,7 @@ export const App: React.FC = () => {
   const pages: Record<string, React.ReactNode> = {
     overview: <MdmOverviewPage onNavigate={setPage} />,
     energy: <MdmEnergyPage onNavigate={setPage} />,
+    forecast: <MdmForecastPage onNavigate={setPage} />,
     equipment: <MdmEquipmentPage onNavigate={setPage} />,
     resource_risk: <MdmResourceRiskPage onNavigate={setPage} />,
     analyst: <MdmAnalystPage onNavigate={setPage} />,
@@ -58,7 +62,8 @@ export const App: React.FC = () => {
   // Active page title map
   const pageTitles: Record<string, { title: string; subtitle: string }> = {
     overview: { title: 'Overview', subtitle: 'Station Operational Intelligence & Multi-Resource Matrix' },
-    energy: { title: 'Energy Analytics', subtitle: 'Continuous Load Profiling, Spikes & Thermal Correlation' },
+    energy: { title: 'Energy Analytics', subtitle: 'Continuous Load Profiling, Spikes & Equipment Association' },
+    forecast: { title: 'Weather Load Forecast', subtitle: 'Pre-Trained ML Load Demand Forecasting & Grounded AI Analysis' },
     equipment: { title: 'Equipment Health', subtitle: 'Statistical Anomaly Detection & Failure Risk Matrix' },
     resource_risk: { title: 'Resource Risk', subtitle: 'Battery Reserves, Consumables & Environmental Stress' },
     analyst: { title: 'AI Operational Analyst', subtitle: 'Empirical Query Assistant Backed by Telemetry Data' },
@@ -164,7 +169,9 @@ export const App: React.FC = () => {
         </header>
 
         {/* Render Active Analytics Page */}
-        {pages[page] ?? <MdmOverviewPage onNavigate={setPage} />}
+        <ErrorBoundary key={page}>
+          {pages[page] ?? <MdmOverviewPage onNavigate={setPage} />}
+        </ErrorBoundary>
       </main>
     </>
   )

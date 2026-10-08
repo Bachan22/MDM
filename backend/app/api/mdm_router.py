@@ -6,23 +6,33 @@ from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 
 from ..schemas.mdm_models import (
     EnergyAnalytics,
+    EnergyReserveAIResponse,
+    EnergyReserveAnalytics,
     EquipmentHealthAnalytics,
     MdmStatus,
+    OperatorInsightResponse,
     OverviewAnalytics,
     PeriodAggregationResponse,
     StationResourceRiskAnalytics,
     UploadResponse,
+    WeatherLoadForecastResponse,
 )
 from ..services.ai_analysis_service import AIAnalysisService
 from ..services.data_cleaning_service import clean_dataset_bytes
 from ..services.energy_analysis_service import calculate_energy_analytics
+from ..services.energy_reserve_service import (
+    calculate_energy_reserve_analytics,
+    get_energy_reserve_ai_analysis,
+)
 from ..services.equipment_health_service import calculate_equipment_health_analytics
+from ..services.forecasting_service import generate_weather_load_forecast
 from ..services.mdm_aggregation_service import aggregate_mdm_period
 from ..services.mdm_storage_service import (
     clear_mdm_data,
     get_mdm_status,
     save_cleaned_dataset,
 )
+from ..services.operator_insight_service import generate_operator_insight
 from ..services.resource_risk_service import calculate_station_resource_risk
 
 router = APIRouter(tags=["MDM Analytics"])
@@ -139,7 +149,16 @@ def get_overview_analytics(
     resource = calculate_station_resource_risk(station, start_date, end_date)
 
     ai_insights = AIAnalysisService.generate_management_insights(
-        energy.dict(), equipment.dict(), resource.dict()
+        energy.model_dump() if hasattr(energy, "model_dump") else energy.dict(),
+        equipment.model_dump() if hasattr(equipment, "model_dump") else equipment.dict(),
+        resource.model_dump() if hasattr(resource, "model_dump") else resource.dict()
+    )
+
+    dynamic_insights = AIAnalysisService.generate_dynamic_insights(
+        energy.model_dump() if hasattr(energy, "model_dump") else energy.dict(),
+        equipment.model_dump() if hasattr(equipment, "model_dump") else equipment.dict(),
+        resource.model_dump() if hasattr(resource, "model_dump") else resource.dict(),
+        status
     )
 
     return OverviewAnalytics(
@@ -170,7 +189,8 @@ def get_overview_analytics(
             "highest_risk_station": resource.station_risks[0].station if resource.station_risks else "None",
             "primary_driver": resource.station_risks[0].main_driver if resource.station_risks else "Nominal"
         },
-        ai_management_insights=ai_insights
+        ai_management_insights=ai_insights,
+        dynamic_ai_insights=dynamic_insights
     )
 
 
@@ -189,6 +209,123 @@ def get_energy_analytics_endpoint(
         )
         res.ai_insights = {"findings": insights}
     return res
+
+
+@router.get("/analytics/operator-insight", response_model=OperatorInsightResponse)
+def get_operator_insight_endpoint(
+    station: Optional[str] = Query(None, description="Station name (e.g. Bharati, Maitri, Dakshin Gangotri)"),
+    anchor_date: Optional[str] = Query(None, description="Anchor reference date"),
+    start_date: Optional[str] = Query(None, description="Start date filter"),
+    end_date: Optional[str] = Query(None, description="End date filter"),
+    horizon: int = Query(24, ge=1, le=168, description="Forecast horizon in hours (12, 24, 48)")
+):
+    """
+    Connected Energy Intelligence & Operator Insight endpoint.
+    Synthesizes Historical Energy Trend -> ML Forecast -> Operational Consequence -> Action.
+    """
+    return generate_operator_insight(
+        station=station,
+        anchor_date=anchor_date,
+        start_date=start_date,
+        end_date=end_date,
+        horizon=horizon
+    )
+
+
+@router.post("/analytics/operator-insight", response_model=OperatorInsightResponse)
+def post_operator_insight_endpoint(payload: dict):
+    """POST variant for connected operator insight."""
+    station = payload.get("station")
+    anchor_date = payload.get("anchor_date")
+    start_date = payload.get("start_date")
+    end_date = payload.get("end_date")
+    horizon = int(payload.get("horizon", payload.get("forecast_horizon", 24)))
+    policy = payload.get("policy")
+    return generate_operator_insight(
+        station=station,
+        anchor_date=anchor_date,
+        start_date=start_date,
+        end_date=end_date,
+        horizon=horizon,
+        policy_override=policy
+    )
+
+
+@router.get("/analytics/energy-reserve", response_model=EnergyReserveAnalytics)
+def get_energy_reserve_endpoint(
+    station: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    safe_days: float = Query(30.0),
+    watch_days: float = Query(15.0),
+    conserve_days: float = Query(7.0),
+    critical_days: float = Query(3.0),
+    configured_capacity_kwh: Optional[float] = Query(None)
+):
+    """
+    Computes energy reserve duration, depletion scenarios across 4 operational modes,
+    sustainability status, and 4-tier load allocation.
+    """
+    policy = {
+        "safe_days": safe_days,
+        "watch_days": watch_days,
+        "conserve_days": conserve_days,
+        "critical_days": critical_days,
+        "configured_capacity_kwh": configured_capacity_kwh
+    }
+    return calculate_energy_reserve_analytics(
+        station=station,
+        start_date=start_date,
+        end_date=end_date,
+        policy_override=policy
+    )
+
+
+@router.post("/analytics/energy-reserve", response_model=EnergyReserveAnalytics)
+def post_energy_reserve_endpoint(payload: dict):
+    """POST variant for energy reserve analytics with custom simulation policy."""
+    station = payload.get("station")
+    start_date = payload.get("start_date")
+    end_date = payload.get("end_date")
+    policy = payload.get("policy", {})
+    return calculate_energy_reserve_analytics(
+        station=station,
+        start_date=start_date,
+        end_date=end_date,
+        policy_override=policy
+    )
+
+
+@router.get("/analytics/energy-reserve/ai", response_model=EnergyReserveAIResponse)
+def get_energy_reserve_ai_endpoint(
+    station: Optional[str] = Query(None, description="Station name (e.g. Bharati, Maitri, Dakshin Gangotri)"),
+    anchor_date: Optional[str] = Query(None, description="Anchor reference date"),
+    horizon: int = Query(24, ge=1, le=168, description="Forecast horizon in hours (e.g. 12, 24, 48)")
+):
+    """
+    Computes dynamic grounded AI operational decision-support for Antarctic station energy reserves.
+    Separated from raw forecast queries to ensure modular, grounded explainability.
+    """
+    return get_energy_reserve_ai_analysis(
+        station=station,
+        anchor_date=anchor_date,
+        horizon=horizon
+    )
+
+
+@router.post("/analytics/energy-reserve/ai", response_model=EnergyReserveAIResponse)
+def post_energy_reserve_ai_endpoint(payload: dict):
+    """POST variant for grounded energy reserve AI analysis."""
+    station = payload.get("station")
+    anchor_date = payload.get("anchor_date")
+    horizon = int(payload.get("horizon", payload.get("forecast_horizon", 24)))
+    policy = payload.get("policy")
+    return get_energy_reserve_ai_analysis(
+        station=station,
+        anchor_date=anchor_date,
+        horizon=horizon,
+        policy_override=policy
+    )
 
 
 @router.get("/analytics/equipment-health", response_model=EquipmentHealthAnalytics)
@@ -211,10 +348,18 @@ def get_equipment_health_endpoint(
 def get_station_resource_risk_endpoint(
     station: Optional[str] = Query(None),
     start_date: Optional[str] = Query(None),
-    end_date: Optional[str] = Query(None)
+    end_date: Optional[str] = Query(None),
+    anchor_date: Optional[str] = Query(None),
+    horizon: int = Query(24)
 ):
-    """Evaluates station resource risk across network stations."""
-    res = calculate_station_resource_risk(station, start_date, end_date)
+    """Evaluates station resource risk across network stations with current and forecast horizon separation."""
+    res = calculate_station_resource_risk(
+        station=station,
+        start_date=start_date,
+        end_date=end_date,
+        anchor_date=anchor_date,
+        horizon=horizon
+    )
     if res.has_data:
         insights = AIAnalysisService.generate_management_insights(
             {}, {}, res.dict()
@@ -236,6 +381,7 @@ def perform_ai_analysis(payload: dict):
 
 
 @router.post("/analytics/chat")
+@router.post("/ai/chat")
 def chat_with_analyst_endpoint(payload: dict):
     """
     AI Analyst Chat endpoint that understands current dashboard state and dataset.
@@ -255,6 +401,37 @@ def chat_with_analyst_endpoint(payload: dict):
         message=message,
         dashboard_context=dashboard_context,
         conversation_history=history
+    )
+
+
+@router.get("/forecast/weather-load", response_model=WeatherLoadForecastResponse)
+def get_weather_load_forecast_endpoint(
+    station: Optional[str] = Query(None, description="Station name (e.g. Bharati, Maitri, Dakshin Gangotri)"),
+    anchor_date: Optional[str] = Query(None, description="Anchor reference date/timestamp"),
+    horizon: int = Query(24, ge=1, le=168, description="Forecast horizon in hours (e.g. 24)")
+):
+    """
+    Computes a 24-hour ahead empirical weather load demand forecast using the
+    pre-trained ML model (polar_ems_weather_load_forecaster.joblib) and generates
+    grounded AI interpretations without numeric alteration.
+    """
+    return generate_weather_load_forecast(
+        station=station,
+        anchor_date=anchor_date,
+        forecast_horizon=horizon
+    )
+
+
+@router.post("/forecast/weather-load", response_model=WeatherLoadForecastResponse)
+def post_weather_load_forecast_endpoint(payload: dict):
+    """POST variant for weather load forecasting."""
+    station = payload.get("station")
+    anchor_date = payload.get("anchor_date")
+    horizon = int(payload.get("horizon", payload.get("forecast_horizon", 24)))
+    return generate_weather_load_forecast(
+        station=station,
+        anchor_date=anchor_date,
+        forecast_horizon=horizon
     )
 
 

@@ -105,11 +105,15 @@ class ModelLoader:
         return {}
 
     def get_model(self, name: str) -> Any:
+        if not self.is_loaded:
+            self.load_all()
         if name not in self.models:
             raise KeyError(f"Model '{name}' is not loaded. Available: {list(self.models.keys())}")
         return self.models[name]
 
     def get_metadata(self, name: str) -> Dict[str, Any]:
+        if not self.is_loaded:
+            self.load_all()
         return self.metadata.get(name, {})
 
     def get_all_metadata(self) -> Dict[str, Any]:

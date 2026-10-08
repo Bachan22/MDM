@@ -49,8 +49,54 @@ CREATE TABLE IF NOT EXISTS mdm_records (
 
 CREATE INDEX IF NOT EXISTS idx_mdm_station_ts ON mdm_records(station, ts);
 CREATE INDEX IF NOT EXISTS idx_mdm_ts ON mdm_records(ts);
+CREATE INDEX IF NOT EXISTS idx_mdm_station_timestamp ON mdm_records(station, timestamp);
+CREATE INDEX IF NOT EXISTS idx_mdm_timestamp ON mdm_records(timestamp);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mdm_unique_record ON mdm_records(station, ts);
 """
+
+# In-memory analytics cache & version tracker
+_DATA_VERSION: int = 1
+_QUERY_CACHE: Dict[str, Any] = {}
+
+
+def get_data_version() -> int:
+    return _DATA_VERSION
+
+
+def invalidate_mdm_cache() -> None:
+    global _DATA_VERSION, _QUERY_CACHE
+    _DATA_VERSION += 1
+    _QUERY_CACHE.clear()
+    try:
+        from .forecasting_service import clear_forecast_cache
+        clear_forecast_cache()
+    except Exception:
+        pass
+    try:
+        from .mdm_aggregation_service import clear_aggregation_cache
+        clear_aggregation_cache()
+    except Exception:
+        pass
+    try:
+        from .energy_analysis_service import clear_energy_cache
+        clear_energy_cache()
+    except Exception:
+        pass
+    try:
+        from .equipment_health_service import clear_equipment_cache
+        clear_equipment_cache()
+    except Exception:
+        pass
+    try:
+        from .resource_risk_service import clear_resource_cache
+        clear_resource_cache()
+    except Exception:
+        pass
+    try:
+        from .operational_context_service import clear_operational_context_cache
+        clear_operational_context_cache()
+    except Exception:
+        pass
 
 
 def init_mdm_schema() -> None:
@@ -67,7 +113,7 @@ def save_cleaned_dataset(
 ) -> Dict[str, Any]:
     """
     Saves a cleaned dataset and merges records into mdm_records.
-    Detects and ignores cross-upload duplicates (deduplication on station + ts).
+    Uses SQLite's indexed UNIQUE constraint for sub-millisecond deduplication without full table scan.
     """
     init_mdm_schema()
     dataset_id = str(uuid.uuid4())[:8]
@@ -75,57 +121,12 @@ def save_cleaned_dataset(
     records = cleaned_data["records"]
 
     conn = get_conn()
-    # Check existing (station, ts) records in database to count cross-dataset duplicates
-    existing_keys = set()
-    rows = conn.execute("SELECT station, ts FROM mdm_records").fetchall()
-    for r in rows:
-        existing_keys.add((r["station"], round(float(r["ts"]), 1)))
+    cnt_before_row = conn.execute("SELECT COUNT(*) as c FROM mdm_records").fetchone()
+    cnt_before = cnt_before_row["c"] if cnt_before_row else 0
 
-    new_records_to_insert = []
-    cross_duplicates_count = 0
-
-    for rec in records:
-        key = (rec["station"], round(float(rec["ts"]), 1))
-        if key in existing_keys:
-            cross_duplicates_count += 1
-            continue
-        existing_keys.add(key)
-        new_records_to_insert.append(rec)
-
-    total_duplicates_removed = stats["duplicates_removed"] + cross_duplicates_count
-
-    # Insert dataset metadata
     with tx() as c:
-        c.execute(
-            """
-            INSERT INTO mdm_datasets (
-                id, filename, upload_timestamp, rows_detected, rows_accepted,
-                rows_rejected, columns_detected, columns_mapped, columns_ignored,
-                duplicates_removed, missing_values_handled, start_date, end_date,
-                stations, file_size_bytes
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                dataset_id,
-                filename,
-                time.time(),
-                stats["rows_detected"],
-                len(new_records_to_insert),
-                stats["rows_rejected"],
-                json.dumps(stats["columns_detected"]),
-                json.dumps(stats["columns_mapped"]),
-                json.dumps(stats["columns_ignored"]),
-                total_duplicates_removed,
-                stats["missing_values_handled"],
-                stats.get("start_date"),
-                stats.get("end_date"),
-                json.dumps(stats.get("stations", [])),
-                file_size_bytes
-            )
-        )
-
-        # Batch insert new records
-        if new_records_to_insert:
+        # Batch insert new records directly; SQLite idx_mdm_unique_record discards duplicates in C-speed
+        if records:
             c.executemany(
                 """
                 INSERT OR IGNORE INTO mdm_records (
@@ -153,15 +154,53 @@ def save_cleaned_dataset(
                         r.get("equipment_runtime"),
                         json.dumps(r)
                     )
-                    for r in new_records_to_insert
+                    for r in records
                 ]
             )
+
+        cnt_after_row = c.execute("SELECT COUNT(*) as c FROM mdm_records").fetchone()
+        cnt_after = cnt_after_row["c"] if cnt_after_row else 0
+        newly_inserted = max(0, cnt_after - cnt_before)
+        cross_duplicates_count = max(0, len(records) - newly_inserted)
+        total_duplicates_removed = stats["duplicates_removed"] + cross_duplicates_count
+
+        # Insert dataset metadata
+        c.execute(
+            """
+            INSERT INTO mdm_datasets (
+                id, filename, upload_timestamp, rows_detected, rows_accepted,
+                rows_rejected, columns_detected, columns_mapped, columns_ignored,
+                duplicates_removed, missing_values_handled, start_date, end_date,
+                stations, file_size_bytes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                dataset_id,
+                filename,
+                time.time(),
+                stats["rows_detected"],
+                newly_inserted,
+                stats["rows_rejected"],
+                json.dumps(stats["columns_detected"]),
+                json.dumps(stats["columns_mapped"]),
+                json.dumps(stats["columns_ignored"]),
+                total_duplicates_removed,
+                stats["missing_values_handled"],
+                stats.get("start_date"),
+                stats.get("end_date"),
+                json.dumps(stats.get("stations", [])),
+                file_size_bytes
+            )
+        )
+
+    # Invalidate cache when new data is added
+    invalidate_mdm_cache()
 
     return {
         "dataset_id": dataset_id,
         "filename": filename,
         "rows_detected": stats["rows_detected"],
-        "rows_accepted": len(new_records_to_insert),
+        "rows_accepted": newly_inserted,
         "rows_rejected": stats["rows_rejected"],
         "columns_detected": stats["columns_detected"],
         "columns_mapped": stats["columns_mapped"],
@@ -171,20 +210,24 @@ def save_cleaned_dataset(
         "start_date": stats.get("start_date"),
         "end_date": stats.get("end_date"),
         "stations_detected": stats.get("stations", []),
-        "merge_status": f"Merged {len(new_records_to_insert)} records into unified historical repository (skipped {cross_duplicates_count} duplicate timestamps)."
+        "merge_status": f"Merged {newly_inserted} records into unified historical repository (skipped {cross_duplicates_count} duplicate timestamps)."
     }
 
 
 def get_mdm_status() -> MdmStatus:
-    """Returns overall status of MDM dataset."""
+    """Returns overall status of MDM dataset with cached memoization."""
     init_mdm_schema()
+    cache_key = f"status_{_DATA_VERSION}"
+    if cache_key in _QUERY_CACHE:
+        return _QUERY_CACHE[cache_key]
+
     conn = get_conn()
 
     count_row = conn.execute("SELECT COUNT(*) as c FROM mdm_records").fetchone()
     total_records = count_row["c"] if count_row else 0
 
     if total_records == 0:
-        return MdmStatus(
+        res = MdmStatus(
             has_data=False,
             records_count=0,
             stations_count=0,
@@ -195,6 +238,8 @@ def get_mdm_status() -> MdmStatus:
             available_variables=[],
             datasets=[]
         )
+        _QUERY_CACHE[cache_key] = res
+        return res
 
     stations_rows = conn.execute("SELECT DISTINCT station FROM mdm_records ORDER BY station").fetchall()
     stations = [r["station"] for r in stations_rows if r["station"]]
@@ -234,7 +279,16 @@ def get_mdm_status() -> MdmStatus:
             )
         )
 
-    return MdmStatus(
+    # Calculate dynamic data quality metrics
+    rows_detected_sum = sum(ds["rows_detected"] for ds in ds_rows)
+    rows_rejected_sum = sum(ds["rows_rejected"] for ds in ds_rows)
+    missing_values_sum = sum(ds["missing_values_handled"] for ds in ds_rows)
+    
+    total_expected_cells = max(1, rows_detected_sum * max(4, len(vars_detected)))
+    missing_pct = round(min(100.0, (missing_values_sum / float(total_expected_cells)) * 100.0), 1)
+    quality_pct = round(max(0.0, min(100.0, 100.0 - missing_pct)), 1)
+
+    result = MdmStatus(
         has_data=True,
         records_count=total_records,
         stations_count=len(stations),
@@ -243,18 +297,31 @@ def get_mdm_status() -> MdmStatus:
         date_range_end=date_end,
         datasets_count=len(datasets),
         available_variables=vars_detected,
-        datasets=datasets
+        datasets=datasets,
+        missing_values_count=missing_values_sum,
+        missing_values_pct=missing_pct,
+        data_quality_pct=quality_pct,
+        valid_records_count=total_records,
+        rows_detected_count=rows_detected_sum,
+        rows_rejected_count=rows_rejected_sum
     )
+    _QUERY_CACHE[cache_key] = result
+    return result
 
 
 def query_mdm_records(
     station: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    limit: Optional[int] = None
+    limit: Optional[int] = None,
+    include_raw: bool = False
 ) -> List[Dict[str, Any]]:
-    """Queries cleaned MDM records with optional filters."""
+    """Queries cleaned MDM records with selective columns and query caching."""
     init_mdm_schema()
+    cache_key = f"q_{_DATA_VERSION}_{station}_{start_date}_{end_date}_{limit}_{include_raw}"
+    if cache_key in _QUERY_CACHE:
+        return _QUERY_CACHE[cache_key]
+
     conn = get_conn()
 
     clauses = []
@@ -277,14 +344,23 @@ def query_mdm_records(
     where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     limit_sql = f"LIMIT {int(limit)}" if limit else ""
 
-    sql = f"SELECT * FROM mdm_records {where_sql} ORDER BY ts ASC {limit_sql}"
+    cols = "*" if include_raw else (
+        "id, dataset_id, station, ts, timestamp, energy_consumption, "
+        "temperature, solar_generation, wind_speed, wind_generation, "
+        "battery_level, equipment_load, equipment_id, equipment_status, equipment_runtime"
+    )
+
+    sql = f"SELECT {cols} FROM mdm_records {where_sql} ORDER BY ts ASC {limit_sql}"
     rows = conn.execute(sql, tuple(params)).fetchall()
-    return [dict(r) for r in rows]
+    results = [dict(r) for r in rows]
+    _QUERY_CACHE[cache_key] = results
+    return results
 
 
 def clear_mdm_data() -> None:
-    """Clears all MDM records and datasets for clean reset."""
+    """Clears all MDM records and datasets for clean reset and invalidates cache."""
     init_mdm_schema()
     with tx() as c:
         c.execute("DELETE FROM mdm_records")
         c.execute("DELETE FROM mdm_datasets")
+    invalidate_mdm_cache()

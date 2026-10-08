@@ -61,6 +61,13 @@ def _get_available_calendar_dates(conn, station: Optional[str]) -> List[str]:
     return [r["dt"] for r in rows if r["dt"] and len(r["dt"]) == 10]
 
 
+_AGG_CACHE: Dict[str, PeriodAggregationResponse] = {}
+
+
+def clear_aggregation_cache() -> None:
+    _AGG_CACHE.clear()
+
+
 def aggregate_mdm_period(
     station: Optional[str] = None,
     period: str = "monthly",
@@ -72,6 +79,12 @@ def aggregate_mdm_period(
     Performs deterministic aggregation across the uploaded dataset.
     Supported periods: 'weekly', 'monthly', 'yearly', 'range' (or 'daily').
     """
+    from .mdm_storage_service import get_data_version
+    version = get_data_version()
+    cache_key = f"{version}_{station}_{period}_{anchor_date}_{start_date}_{end_date}"
+    if cache_key in _AGG_CACHE:
+        return _AGG_CACHE[cache_key]
+
     conn = get_conn()
     available_dates = _get_available_calendar_dates(conn, station)
 
@@ -79,7 +92,7 @@ def aggregate_mdm_period(
         # Check if there are any records without energy_consumption
         cnt_row = conn.execute("SELECT COUNT(*) as c FROM mdm_records").fetchone()
         total_recs = cnt_row["c"] if cnt_row else 0
-        return PeriodAggregationResponse(
+        res = PeriodAggregationResponse(
             has_data=False,
             period=period,
             period_label="No Dataset",
@@ -98,19 +111,24 @@ def aggregate_mdm_period(
             available_calendar_dates=[],
             missing_notice="No operational dataset available. Upload CSV/Excel to begin."
         )
+        _AGG_CACHE[cache_key] = res
+        return res
 
     anchor = _parse_anchor_date(anchor_date, conn)
     period_lower = (period or "monthly").lower()
 
     if period_lower == "weekly":
-        return _aggregate_weekly(conn, station, anchor, available_dates)
+        res = _aggregate_weekly(conn, station, anchor, available_dates)
     elif period_lower == "yearly":
-        return _aggregate_yearly(conn, station, anchor, available_dates)
+        res = _aggregate_yearly(conn, station, anchor, available_dates)
     elif period_lower in ("range", "daily", "custom"):
-        return _aggregate_range(conn, station, anchor, start_date, end_date, available_dates)
+        res = _aggregate_range(conn, station, anchor, start_date, end_date, available_dates)
     else:
         # Default: monthly
-        return _aggregate_monthly(conn, station, anchor, available_dates)
+        res = _aggregate_monthly(conn, station, anchor, available_dates)
+
+    _AGG_CACHE[cache_key] = res
+    return res
 
 
 def _aggregate_weekly(

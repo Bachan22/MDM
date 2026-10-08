@@ -5,7 +5,13 @@ import math
 from typing import Any, Dict, List, Optional
 
 from ..schemas.mdm_models import EnergyAnalytics
-from .mdm_storage_service import query_mdm_records
+from .mdm_storage_service import query_mdm_records, get_data_version
+
+_ENERGY_CACHE: Dict[str, EnergyAnalytics] = {}
+
+
+def clear_energy_cache() -> None:
+    _ENERGY_CACHE.clear()
 
 
 def calculate_energy_analytics(
@@ -14,14 +20,21 @@ def calculate_energy_analytics(
     end_date: Optional[str] = None
 ) -> EnergyAnalytics:
     """Calculates deterministic energy consumption analytics from real uploaded data."""
+    version = get_data_version()
+    cache_key = f"{version}_{station}_{start_date}_{end_date}"
+    if cache_key in _ENERGY_CACHE:
+        return _ENERGY_CACHE[cache_key]
+
     records = query_mdm_records(station=station, start_date=start_date, end_date=end_date)
 
     if not records:
-        return EnergyAnalytics(
+        res = EnergyAnalytics(
             has_data=False,
             data_period={"start": start_date, "end": end_date},
             missing_fields_notice=["No records found matching the specified filters or no dataset uploaded."]
         )
+        _ENERGY_CACHE[cache_key] = res
+        return res
 
     # Filter records with energy_consumption or equipment_load fallback
     for r in records:
@@ -146,7 +159,7 @@ def calculate_energy_analytics(
         unit = "MWh"
         display_total = round(total_energy_kwh / 1000.0, 2)
 
-    return EnergyAnalytics(
+    res = EnergyAnalytics(
         has_data=True,
         data_period={
             "start": records[0]["timestamp"],
@@ -168,3 +181,5 @@ def calculate_energy_analytics(
         renewable_available=renewable_available,
         missing_fields_notice=missing_notices
     )
+    _ENERGY_CACHE[cache_key] = res
+    return res

@@ -5,7 +5,13 @@ import math
 from typing import Any, Dict, List, Optional
 
 from ..schemas.mdm_models import EquipmentHealthAnalytics, EquipmentHealthRecord
-from .mdm_storage_service import query_mdm_records
+from .mdm_storage_service import query_mdm_records, get_data_version
+
+_EQUIPMENT_CACHE: Dict[str, EquipmentHealthAnalytics] = {}
+
+
+def clear_equipment_cache() -> None:
+    _EQUIPMENT_CACHE.clear()
 
 
 def calculate_equipment_health_analytics(
@@ -14,10 +20,15 @@ def calculate_equipment_health_analytics(
     end_date: Optional[str] = None
 ) -> EquipmentHealthAnalytics:
     """Performs statistical anomaly detection and equipment health evaluation."""
+    version = get_data_version()
+    cache_key = f"{version}_{station}_{start_date}_{end_date}"
+    if cache_key in _EQUIPMENT_CACHE:
+        return _EQUIPMENT_CACHE[cache_key]
+
     records = query_mdm_records(station=station, start_date=start_date, end_date=end_date)
 
     if not records:
-        return EquipmentHealthAnalytics(
+        res = EquipmentHealthAnalytics(
             has_data=False,
             records_analyzed=0,
             anomalies_detected=0,
@@ -26,6 +37,8 @@ def calculate_equipment_health_analytics(
             methodology_note="No records available.",
             missing_fields_notice=["No records found matching filters or no dataset uploaded."]
         )
+        _EQUIPMENT_CACHE[cache_key] = res
+        return res
 
     # Check available equipment variables
     has_load = any(r.get("equipment_load") is not None for r in records)
@@ -218,7 +231,7 @@ def calculate_equipment_health_analytics(
         f"(z-score > 2.2 on {primary_metric_name} and thermal excursions). It is not a trained ML failure prediction model."
     )
 
-    return EquipmentHealthAnalytics(
+    res = EquipmentHealthAnalytics(
         has_data=True,
         records_analyzed=len(records),
         anomalies_detected=len(anomalies),
@@ -232,3 +245,5 @@ def calculate_equipment_health_analytics(
         temp_vs_load=temp_vs_load,
         missing_fields_notice=missing_notices
     )
+    _EQUIPMENT_CACHE[cache_key] = res
+    return res
